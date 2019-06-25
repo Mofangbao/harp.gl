@@ -233,10 +233,31 @@ export namespace MapViewUtils {
      * the map to the left in default camera orientation.
      * @param yOffset In world space. Value > 0 will pan the map upwards, value < 0 will pan the map
      * downwards in default camera orientation.
+     * @param radius World space units used to prevent camera intersection with terrain (if an
+     * [[ElevationProvider]] was configured by the user).
      */
-    export function pan(mapView: MapView, offsetX: number, offsetY: number): void {
-        mapView.camera.position.x += offsetX;
-        mapView.camera.position.y += offsetY;
+    export function pan(
+        mapView: MapView,
+        offsetX: number,
+        offsetY: number,
+        radius: number = 100
+    ): void {
+        const cameraPosition = mapView.camera.position;
+        cameraPosition.x += offsetX;
+        cameraPosition.y += offsetY;
+        const cameraHeight = mapView.projection.unprojectAltitude(cameraPosition);
+        if (mapView.elevationProvider !== undefined) {
+            const geoPosition = mapView.projection.unprojectPoint(cameraPosition);
+            const terrainHeight = mapView.elevationProvider.getHeight(geoPosition);
+            const surfaceNormal = mapView.projection.surfaceNormal(
+                cameraPosition,
+                new THREE.Vector3()
+            );
+            const heightToCheck = cameraHeight - radius;
+            if (terrainHeight !== undefined && heightToCheck < terrainHeight) {
+                cameraPosition.addScaledVector(surfaceNormal, terrainHeight - heightToCheck);
+            }
+        }
         mapView.update();
     }
 
