@@ -5,15 +5,15 @@
  */
 
 import { Env, MapEnv, Value, ValueMap } from "@here/harp-datasource-protocol/index-decoder";
-import { EarthConstants, GeoBox, TileKey } from "@here/harp-geoutils";
+import { GeoBox, TileKey } from "@here/harp-geoutils";
 import { ILogger } from "@here/harp-utils";
 import * as Long from "long";
-import { Vector3 } from "three";
+import { Vector2 } from "three";
 import { IGeometryProcessor, ILineGeometry, IPolygonGeometry, IRing } from "./IGeometryProcessor";
 import { OmvFeatureFilter } from "./OmvDataFilter";
 import { OmvDataAdapter } from "./OmvDecoder";
 import { OmvGeometryType } from "./OmvDecoderDefs";
-import { isArrayBufferLike, lat2tile } from "./OmvUtils";
+import { isArrayBufferLike } from "./OmvUtils";
 import { com } from "./proto/vector_tile";
 
 /**
@@ -36,8 +36,7 @@ export interface BaseCommand {
  * @hidden
  */
 export interface PositionCommand extends BaseCommand {
-    position: Vector3;
-    outline?: boolean;
+    position: Vector2;
 }
 
 /**
@@ -178,20 +177,8 @@ export interface GeometryCommandsVisitor {
  * @hidden
  */
 export class GeometryCommands {
-    accept(
-        geometry: number[],
-        tileKey: TileKey,
-        geoBox: GeoBox,
-        extent: number = 4096,
-        visitor: GeometryCommandsVisitor
-    ) {
+    accept(geometry: number[], visitor: GeometryCommandsVisitor) {
         const geometryCount = geometry.length;
-
-        const { north, west } = geoBox;
-        const N = Math.log2(extent);
-        const scale = Math.pow(2, tileKey.level + N);
-        const top = lat2tile(north, tileKey.level + N);
-        const left = ((west + 180) / 360) * scale;
 
         let currX = 0;
         let currY = 0;
@@ -219,29 +206,12 @@ export class GeometryCommands {
                         yCoords.push(currY);
                     }
 
-                    const R = EarthConstants.EQUATORIAL_CIRCUMFERENCE;
-
-                    const position = new Vector3(
-                        ((left + currX) / scale) * R,
-                        ((top + currY) / scale) * R,
-                        0
-                    );
-
+                    const position = new Vector2(currX, -currY);
                     commands.push({ kind, position });
                 }
             } else {
-                for (let i = 0; i < commands.length; ++i) {
-                    const prevX = xCoords[i];
-                    const prevY = yCoords[i];
-                    const nextX = xCoords[(i + 1) % xCoords.length];
-                    const nextY = yCoords[(i + 1) % yCoords.length];
-                    (commands[i] as PositionCommand).outline = !(
-                        (prevX <= 0 && nextX <= 0) ||
-                        (prevX >= extent && nextX >= extent) ||
-                        (prevY <= 0 && nextY <= 0) ||
-                        (prevY >= extent && nextY >= extent)
-                    );
-                    visitor.visitCommand(commands[i]);
+                for (const command of commands) {
+                    visitor.visitCommand(command);
                 }
                 visitor.visitCommand({ kind });
                 xCoords.length = 0;
@@ -477,6 +447,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -485,21 +456,15 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
             return;
         }
 
-        const geometry: Vector3[] = [];
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Point",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        geometry.push(command.position);
-                    }
+        const geometry: Vector2[] = [];
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Point",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    geometry.push(command.position);
                 }
             }
-        );
+        });
 
         if (geometry.length === 0) {
             return;
@@ -507,7 +472,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const env = createFeatureEnv(this.m_layer, feature, "point", storageLevel, this.m_logger);
 
-        this.m_processor.processPointFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processPointFeature(layerName, layerExtents, geometry, env, storageLevel);
     }
 
     /**
@@ -522,6 +487,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -531,24 +497,18 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
         }
 
         const geometry: ILineGeometry[] = [];
-        let positions: Vector3[];
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Line",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        positions = [command.position];
-                        geometry.push({ positions });
-                    } else if (isLineToCommand(command)) {
-                        positions.push(command.position);
-                    }
+        let positions: Vector2[];
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Line",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    positions = [command.position];
+                    geometry.push({ positions });
+                } else if (isLineToCommand(command)) {
+                    positions.push(command.position);
                 }
             }
-        );
+        });
 
         if (geometry.length === 0) {
             return;
@@ -556,7 +516,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const env = createFeatureEnv(this.m_layer, feature, "line", storageLevel, this.m_logger);
 
-        this.m_processor.processLineFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processLineFeature(layerName, layerExtents, geometry, env, storageLevel);
     }
 
     /**
@@ -571,6 +531,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -582,28 +543,20 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
         const geometry: IPolygonGeometry[] = [];
         const currentPolygon: IPolygonGeometry = { rings: [] };
         let currentRing: IRing;
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Polygon",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        currentRing = {
-                            positions: [command.position],
-                            outlines: [command.outline!]
-                        };
-                    } else if (isLineToCommand(command)) {
-                        currentRing.positions.push(command.position);
-                        currentRing.outlines!.push(command.outline!);
-                    } else if (isClosePathCommand(command)) {
-                        currentPolygon.rings.push(currentRing);
-                    }
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Polygon",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    currentRing = {
+                        positions: [command.position]
+                    };
+                } else if (isLineToCommand(command)) {
+                    currentRing.positions.push(command.position);
+                } else if (isClosePathCommand(command)) {
+                    currentPolygon.rings.push(currentRing);
                 }
             }
-        );
+        });
 
         if (currentPolygon.rings.length > 0) {
             geometry.push(currentPolygon);
@@ -615,6 +568,12 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const env = createFeatureEnv(this.m_layer, feature, "polygon", storageLevel, this.m_logger);
 
-        this.m_processor.processPolygonFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processPolygonFeature(
+            layerName,
+            layerExtents,
+            geometry,
+            env,
+            storageLevel
+        );
     }
 }

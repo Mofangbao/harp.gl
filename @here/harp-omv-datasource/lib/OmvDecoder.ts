@@ -62,17 +62,12 @@ export class Ring {
      *               using the equirectangular projection.
      * @param contourOutlines An optional [[Array]] of outline attributes.
      */
-    constructor(
-        readonly vertexStride: number,
-        readonly contour: number[],
-        readonly contourOutlines?: boolean[],
-        readonly points: number[] = contour
-    ) {
+    constructor(readonly vertexStride: number, readonly contour: number[]) {
         this.winding = this.area() < 0;
     }
 
     area(): number {
-        const points = this.points;
+        const points = this.contour;
         const stride = this.vertexStride;
         const n = points.length / stride;
 
@@ -91,21 +86,12 @@ export class Ring {
      * Extracts outlines from the ring contour data
      */
     getOutlines() {
-        const stride = this.vertexStride;
-        const { contourOutlines, contour } = this;
-
-        if (contourOutlines === undefined) {
-            const outLine = contour.slice();
-            outLine.push(...outLine.slice(0, stride));
-            return [outLine];
-        }
-
-        const { length } = contourOutlines;
+        const length = this.contour.length / this.vertexStride;
 
         const lines: number[][] = [];
         let line: number[] = [];
 
-        for (let i = 0; i < length; i++) {
+        /* for (let i = 0; i < length; i++) {
             const isOutline = contourOutlines[i];
             let index = i * stride;
 
@@ -123,7 +109,7 @@ export class Ring {
         }
         if (line.length) {
             lines.push(line);
-        }
+        } */
 
         return lines;
     }
@@ -132,7 +118,8 @@ export class Ring {
 export interface IOmvEmitter {
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
+        extents: number,
+        geometry: THREE.Vector2[],
         env: MapEnv,
         techniques: Technique[],
         featureId: number | undefined
@@ -140,6 +127,7 @@ export interface IOmvEmitter {
 
     processLineFeature(
         layer: string,
+        extents: number,
         feature: ILineGeometry[],
         env: MapEnv,
         techniques: Technique[],
@@ -148,6 +136,7 @@ export interface IOmvEmitter {
 
     processPolygonFeature(
         layer: string,
+        extents: number,
         feature: IPolygonGeometry[],
         env: MapEnv,
         techniques: Technique[],
@@ -270,7 +259,8 @@ export class OmvDecoder implements IGeometryProcessor {
 
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
+        extents: number,
+        geometry: THREE.Vector2[],
         env: MapEnv,
         storageLevel: number
     ): void {
@@ -301,6 +291,7 @@ export class OmvDecoder implements IGeometryProcessor {
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processPointFeature(
                 layer,
+                extents,
                 geometry,
                 env,
                 techniques,
@@ -308,12 +299,20 @@ export class OmvDecoder implements IGeometryProcessor {
             );
         }
         if (this.m_infoTileEmitter) {
-            this.m_infoTileEmitter.processPointFeature(layer, geometry, env, techniques, featureId);
+            this.m_infoTileEmitter.processPointFeature(
+                layer,
+                extents,
+                geometry,
+                env,
+                techniques,
+                featureId
+            );
         }
     }
 
     processLineFeature(
         layer: string,
+        extents: number,
         geometry: ILineGeometry[],
         env: MapEnv,
         storageLevel: number
@@ -345,6 +344,7 @@ export class OmvDecoder implements IGeometryProcessor {
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processLineFeature(
                 layer,
+                extents,
                 geometry,
                 env,
                 techniques,
@@ -352,12 +352,20 @@ export class OmvDecoder implements IGeometryProcessor {
             );
         }
         if (this.m_infoTileEmitter) {
-            this.m_infoTileEmitter.processLineFeature(layer, geometry, env, techniques, featureId);
+            this.m_infoTileEmitter.processLineFeature(
+                layer,
+                extents,
+                geometry,
+                env,
+                techniques,
+                featureId
+            );
         }
     }
 
     processPolygonFeature(
         layer: string,
+        extents: number,
         geometry: IPolygonGeometry[],
         env: MapEnv,
         storageLevel: number
@@ -388,6 +396,7 @@ export class OmvDecoder implements IGeometryProcessor {
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processPolygonFeature(
                 layer,
+                extents,
                 geometry,
                 env,
                 techniques,
@@ -397,6 +406,7 @@ export class OmvDecoder implements IGeometryProcessor {
         if (this.m_infoTileEmitter) {
             this.m_infoTileEmitter.processPolygonFeature(
                 layer,
+                extents,
                 geometry,
                 env,
                 techniques,

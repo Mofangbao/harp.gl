@@ -46,7 +46,8 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
 
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
+        extents: number,
+        geometry: THREE.Vector2[],
         env: MapEnv,
         techniques: IndexedTechnique[],
         featureId: number | undefined
@@ -65,9 +66,12 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
             const infoTileTechniqueIndex = tileInfoWriter.addTechnique(technique);
 
             for (const pos of geometry) {
-                const { x, y } = targetProjection
+                // TODO: FIX.
+                /* const { x, y } = targetProjection
                     .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(center);
+                    .sub(center); */
+                const x = 0;
+                const y = 0;
 
                 tileInfoWriter.addFeature(
                     this.m_tileInfo.pointGroup,
@@ -85,6 +89,7 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
 
     processLineFeature(
         layer: string,
+        extents: number,
         geometry: ILineGeometry[],
         env: MapEnv,
         techniques: IndexedTechnique[],
@@ -101,10 +106,11 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
         for (const polyline of geometry) {
             const line: number[] = [];
             for (const pos of polyline.positions) {
-                const { x, y } = targetProjection
+                // TODO: FIX.
+                /* const { x, y } = targetProjection
                     .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(center);
-                line.push(x, y);
+                    .sub(center); */
+                line.push(0, 0);
             }
             lines.push(line);
         }
@@ -147,6 +153,7 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
 
     processPolygonFeature(
         layer: string,
+        extents: number,
         geometry: IPolygonGeometry[],
         env: MapEnv,
         techniques: IndexedTechnique[],
@@ -171,10 +178,11 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
             for (const outline of polygon.rings) {
                 const contour: number[] = [];
                 for (const pos of outline.positions) {
-                    const { x, y, z } = targetProjection
+                    // TODO: FIX.
+                    /* const { x, y, z } = targetProjection
                         .reprojectPoint(webMercatorProjection, pos, worldPos)
-                        .sub(center);
-                    contour.push(x, y, z);
+                        .sub(center); */
+                    contour.push(0, 0, 0);
                 }
                 rings.push(new Ring(3, contour));
             }

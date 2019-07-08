@@ -50,6 +50,7 @@ import earcut from "earcut";
 import * as THREE from "three";
 
 import {
+    EarthConstants,
     mercatorProjection,
     normalizedEquirectangularProjection,
     ProjectionType,
@@ -59,6 +60,7 @@ import {
 import { ILineGeometry, IPolygonGeometry } from "./IGeometryProcessor";
 import { LinesGeometry } from "./OmvDataSource";
 import { IOmvEmitter, OmvDecoder, Ring } from "./OmvDecoder";
+import { lat2tile } from "./OmvUtils";
 
 // tslint:disable-next-line: max-line-length
 import { SphericalGeometrySubdivisionModifier } from "@here/harp-geometry/lib/SphericalGeometrySubdivisionModifier";
@@ -171,6 +173,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the Point of Interest geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
+     * @param extents Tile's layer extents.
      * @param feature The current feature containing the main geometry.
      * @param env The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
@@ -178,7 +181,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      */
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
+        extents: number,
+        geometry: THREE.Vector2[],
         env: MapEnv,
         techniques: IndexedTechnique[],
         featureId: number | undefined
@@ -227,12 +231,15 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 }
             }
 
-            const worldPos = new THREE.Vector3();
+            const { north, west } = this.m_decodeInfo.geoBox;
+            const N = Math.log2(extents);
+            const scale = Math.pow(2, this.m_decodeInfo.tileKey.level + N);
+            const top = lat2tile(north, this.m_decodeInfo.tileKey.level + N);
+            const left = ((west + 180) / 360) * scale;
+            const R = EarthConstants.EQUATORIAL_CIRCUMFERENCE;
 
+            const worldPos = new THREE.Vector3();
             for (const pos of geometry) {
-                const { x, y, z } = this.m_decodeInfo.targetProjection
-                    .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(this.m_decodeInfo.center);
                 if (shouldCreateTextGeometries) {
                     const textTechnique = technique as TextTechnique;
                     const textLabel = textTechnique.label;
@@ -257,7 +264,11 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
 
                 // Always store the position, otherwise the following POIs will be
                 // misplaced.
-                positions.push(x, y, z);
+                worldPos.set(((left + pos.x) / scale) * R, R - ((top - pos.y) / scale) * R, 0);
+                this.m_decodeInfo.targetProjection
+                    .reprojectPoint(mercatorProjection, worldPos, worldPos)
+                    .sub(this.m_decodeInfo.center);
+                positions.push(worldPos.x, worldPos.y, worldPos.z);
 
                 if (this.m_gatherFeatureIds) {
                     featureIds.push(featureId);
@@ -278,6 +289,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the line geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
+     * @param extents Tile's layer extents.
      * @param feature The current feature containing the main geometry.
      * @param env The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
@@ -285,6 +297,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      */
     processLineFeature(
         layer: string,
+        extents: number,
         geometry: ILineGeometry[],
         env: MapEnv,
         techniques: IndexedTechnique[],
@@ -302,13 +315,21 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         const tileHeight = projectedTileBounds.max.y - projectedTileBounds.min.y;
         const tileSizeInMeters = Math.max(tileWidth, tileHeight);
 
+        const { north, west } = this.m_decodeInfo.geoBox;
+        const N = Math.log2(extents);
+        const scale = Math.pow(2, this.m_decodeInfo.tileKey.level + N);
+        const top = lat2tile(north, this.m_decodeInfo.tileKey.level + N);
+        const left = ((west + 180) / 360) * scale;
+        const R = EarthConstants.EQUATORIAL_CIRCUMFERENCE;
+
         for (const polyline of geometry) {
             const line: number[] = [];
             polyline.positions.forEach(pos => {
-                const { x, y, z } = targetProjection
-                    .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(center);
-                line.push(x, y, z);
+                worldPos.set(((left + pos.x) / scale) * R, R - ((top - pos.y) / scale) * R, 0);
+                this.m_decodeInfo.targetProjection
+                    .reprojectPoint(mercatorProjection, worldPos, worldPos)
+                    .sub(this.m_decodeInfo.center);
+                line.push(worldPos.x, worldPos.y, worldPos.z);
             });
             lines.push(line);
         }
@@ -517,6 +538,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the polygons geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
+     * @param extents Tile's layer extents.
      * @param feature The current feature containing the main geometry.
      * @param env The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
@@ -524,14 +546,13 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      */
     processPolygonFeature(
         layer: string,
+        extents: number,
         geometry: IPolygonGeometry[],
         env: MapEnv,
         techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void {
         this.processFeatureCommon(env);
-
-        const { targetProjection, center } = this.m_decodeInfo;
 
         techniques.forEach(technique => {
             if (technique === undefined) {
@@ -547,12 +568,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 );
             }
 
-            const extrudedPolygonTechnique = technique as ExtrudedPolygonTechnique;
-            const fillTechnique = technique as FillTechnique;
-
             const polygons: Ring[][] = [];
-
-            const worldPos = new THREE.Vector3();
 
             const isExtruded = isExtrudedPolygonTechnique(technique);
             const isFilled = isFillTechnique(technique);
@@ -563,15 +579,6 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 isDashedLineTechnique(technique) ||
                 isLineTechnique(technique);
             const isPolygon = isExtruded || isFilled || isStandardTechnique(technique);
-
-            const edgeWidth = isExtruded
-                ? extrudedPolygonTechnique.lineWidth || 0.0
-                : isFilled
-                ? fillTechnique.lineWidth || 0.0
-                : 0.0;
-            const hasEdges = edgeWidth > 0.0 || isLine;
-
-            const isSpherical = targetProjection.type === ProjectionType.Spherical;
 
             const tempTexcoords = new THREE.Vector3();
 
@@ -594,56 +601,39 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                       }
                     : undefined;
 
-            const vertexStride = computeTexCoords !== undefined ? 5 : 3;
+            const vertexStride = computeTexCoords !== undefined ? 4 : 2;
 
             for (const polygon of geometry) {
                 const rings: Ring[] = [];
 
                 for (const outline of polygon.rings) {
                     const ringContour: number[] = [];
-                    const ringPoints: number[] | undefined = isSpherical ? [] : undefined;
-                    let ringEdges: boolean[] | undefined;
 
-                    for (let coordIdx = 0; coordIdx < outline.positions.length; ++coordIdx) {
-                        const pos = outline.positions[coordIdx];
-                        targetProjection
-                            .reprojectPoint(webMercatorProjection, pos, worldPos)
-                            .sub(center);
-
-                        ringContour.push(worldPos.x, worldPos.y, worldPos.z);
-
-                        if (ringPoints !== undefined) {
-                            mercatorProjection.reprojectPoint(webMercatorProjection, pos, worldPos);
-
-                            ringPoints.push(worldPos.x, worldPos.y, worldPos.z);
-                        }
-
-                        if (hasEdges && outline.outlines !== undefined) {
-                            const edge = outline.outlines[coordIdx];
-                            if (ringEdges === undefined) {
-                                ringEdges = [edge];
-                            } else {
-                                ringEdges.push(edge);
-                            }
-                        }
-
+                    for (const coord of outline.positions) {
+                        ringContour.push(coord.x, coord.y);
                         if (computeTexCoords !== undefined) {
-                            const { u, v } = computeTexCoords(pos);
+                            const { u, v } = computeTexCoords(
+                                new THREE.Vector3(coord.x, coord.y, 0)
+                            );
                             ringContour.push(u, v);
-                            if (ringPoints !== undefined) {
-                                ringPoints.push(u, v);
-                            }
                         }
                     }
 
-                    rings.push(new Ring(vertexStride, ringContour, ringEdges, ringPoints));
+                    rings.push(new Ring(vertexStride, ringContour));
                 }
 
                 polygons.push(rings);
             }
 
             if (isPolygon) {
-                this.applyPolygonTechnique(polygons, technique, techniqueIndex, featureId, env);
+                this.applyPolygonTechnique(
+                    polygons,
+                    technique,
+                    techniqueIndex,
+                    featureId,
+                    env,
+                    extents
+                );
             } else if (isLine) {
                 const lineGeometry =
                     technique.name === "line"
@@ -766,7 +756,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         technique: Technique,
         techniqueIndex: number,
         featureId: number | undefined,
-        env: MapEnv
+        env: MapEnv,
+        extents: number
     ): void {
         const isExtruded = isExtrudedPolygonTechnique(technique);
 
@@ -778,6 +769,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         }
 
         const extrudedPolygonTechnique = technique as ExtrudedPolygonTechnique;
+        const fillTechnique = technique as FillTechnique;
+        const boundaryWalls = extrudedPolygonTechnique.boundaryWalls !== false;
 
         const isFilled = isFillTechnique(technique);
         const texCoordType = textureCoordinateType(technique);
@@ -807,159 +800,185 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
             groups
         } = meshBuffers;
 
-        const stride = texCoordType !== undefined ? 5 : 3;
+        const featureStride = texCoordType !== undefined ? 4 : 2;
+        const vertexStride = featureStride + 1;
         const isSpherical = this.m_decodeInfo.targetProjection.type === ProjectionType.Spherical;
 
-        for (const rings of polygons) {
-            const start = indices.length;
-            const basePosition = positions.length;
+        const edgeWidth = isExtruded
+            ? extrudedPolygonTechnique.lineWidth || 0.0
+            : isFilled
+            ? fillTechnique.lineWidth || 0.0
+            : 0.0;
+        const hasEdges = edgeWidth > 0.0;
 
-            for (let ringIndex = 0; ringIndex < rings.length; ) {
-                const baseVertex = positions.length / 3;
+        const color = new THREE.Color(
+            extrudedPolygonTechnique.color !== undefined
+                ? getPropertyValue(extrudedPolygonTechnique.color, this.m_decodeInfo.tileKey.level)
+                : this.isColorStringValid(env.lookup("color") as string)
+                ? (env.lookup("color") as string)
+                : extrudedPolygonTechnique.defaultColor !== undefined
+                ? getPropertyValue(
+                      extrudedPolygonTechnique.defaultColor,
+                      this.m_decodeInfo.tileKey.level
+                  )
+                : 0x000000
+        );
 
-                // Get the contour vertices for this ring.
-                const ring = rings[ringIndex++];
+        for (const polygon of polygons) {
+            const startIndexCount = indices.length;
 
-                const vertices: number[] = [...ring.contour];
-                const points: number[] = [...ring.points];
+            for (let ringIndex = 0; ringIndex < polygon.length; ) {
+                const vertices: number[] = [];
+                const polygonBaseVertex = positions.length / 3;
 
-                if (isExtruded) {
-                    addExtrudedWalls(
-                        indices,
-                        baseVertex,
-                        stride,
-                        ring.contour,
-                        ring.contourOutlines,
-                        extrudedPolygonTechnique.boundaryWalls
+                const { contour, winding } = polygon[ringIndex++];
+                for (let i = 0; i < contour.length / featureStride; ++i) {
+                    for (let j = 0; j < featureStride; ++j) {
+                        vertices.push(contour[i * featureStride + j]);
+                    }
+                    const nextIdx = (i + 1) % (contour.length / featureStride);
+                    const currX = contour[i * featureStride];
+                    const currY = -contour[i * featureStride + 1];
+                    const nextX = contour[nextIdx * featureStride];
+                    const nextY = -contour[nextIdx * featureStride + 1];
+                    vertices.push(
+                        boundaryWalls ||
+                            !(
+                                (currX <= 0 && nextX <= 0) ||
+                                (currX >= extents && nextX >= extents) ||
+                                (currY <= 0 && nextY <= 0) ||
+                                (currY >= extents && nextY >= extents)
+                            )
+                            ? nextIdx
+                            : -1
                     );
                 }
-                if (ring.contourOutlines !== undefined) {
-                    addPolygonEdges(
-                        edgeIndices,
-                        baseVertex,
-                        stride,
-                        ring.contour,
-                        ring.contourOutlines,
-                        isExtruded,
-                        extrudedPolygonTechnique.footprint,
-                        extrudedPolygonTechnique.maxSlope
-                    );
-                }
-
-                // Repeat the process for all the inner rings (holes).
-                const outerRingWinding = ring.winding;
-                const holes: number[] = [];
 
                 // Iterate over the inner rings. The inner rings have the oppositve winding
                 // of the outer rings.
-                while (ringIndex < rings.length && rings[ringIndex].winding !== outerRingWinding) {
-                    const current = rings[ringIndex++];
-                    holes.push(vertices.length / stride);
+                const holes: number[] = [];
+                while (ringIndex < polygon.length && polygon[ringIndex].winding !== winding) {
+                    const vertexOffset = vertices.length / vertexStride;
+                    holes.push(vertexOffset);
 
-                    // As we are predicting the indexes before the vertices are added,
-                    // the vertex offset has to be taken into account
-                    const vertexOffset = (vertices.length / stride) * 2;
-                    vertices.push(...current.contour);
-                    points.push(...current.points);
-
-                    if (isExtruded) {
-                        addExtrudedWalls(
-                            indices,
-                            vertexOffset + baseVertex,
-                            stride,
-                            current.contour,
-                            current.contourOutlines,
-                            extrudedPolygonTechnique.boundaryWalls
-                        );
-                    }
-                    if (current.contourOutlines !== undefined) {
-                        addPolygonEdges(
-                            edgeIndices,
-                            (isExtruded ? vertexOffset : vertexOffset / 2) + baseVertex,
-                            stride,
-                            current.contour,
-                            current.contourOutlines,
-                            isExtruded,
-                            extrudedPolygonTechnique.footprint,
-                            extrudedPolygonTechnique.maxSlope
+                    const hole = polygon[ringIndex++].contour;
+                    for (let i = 0; i < hole.length / featureStride; ++i) {
+                        for (let j = 0; j < featureStride; ++j) {
+                            vertices.push(hole[i * featureStride + j]);
+                        }
+                        const nextIdx = (i + 1) % (hole.length / featureStride);
+                        const currX = hole[i * featureStride];
+                        const currY = -hole[i * featureStride + 1];
+                        const nextX = hole[nextIdx * featureStride];
+                        const nextY = -hole[nextIdx * featureStride + 1];
+                        vertices.push(
+                            boundaryWalls ||
+                                !(
+                                    (currX <= 0 && nextX <= 0) ||
+                                    (currX >= extents && nextX >= extents) ||
+                                    (currY <= 0 && nextY <= 0) ||
+                                    (currY >= extents && nextY >= extents)
+                                )
+                                ? vertexOffset + nextIdx
+                                : -1
                         );
                     }
                 }
 
                 try {
                     // Triangulate the footprint polyline.
-                    // For sphere projection the stride of Ring.contour and Ring.points can be
-                    // different b/c Ring.contour contains texture coordinates where Ring.points
+                    // For sphere projection the stride of ringContour and Ring.points can be
+                    // different b/c ringContour contains texture coordinates where Ring.points
                     // does not.
-                    const triangles = earcut(points, holes, stride);
+                    const triangles = earcut(vertices, holes, vertexStride);
 
+                    const { north, west } = this.m_decodeInfo.geoBox;
+                    const N = Math.log2(extents);
+                    const scale = Math.pow(2, this.m_decodeInfo.tileKey.level + N);
+                    const top = lat2tile(north, this.m_decodeInfo.tileKey.level + N);
+                    const left = ((west + 180) / 360) * scale;
+                    const R = EarthConstants.EQUATORIAL_CIRCUMFERENCE;
+
+                    const originalVertexCount = vertices.length / vertexStride;
                     if (isSpherical) {
-                        const geom = new THREE.Geometry();
+                        const geom = new THREE.BufferGeometry();
 
-                        for (let i = 0; i < vertices.length; i += stride) {
-                            geom.vertices.push(
-                                new THREE.Vector3(points[i], points[i + 1], points[i + 2])
-                            );
-                        }
-                        for (let i = 0; i < triangles.length; i += 3) {
-                            geom.faces.push(
-                                new THREE.Face3(triangles[i], triangles[i + 1], triangles[i + 2])
+                        const positionArray = [];
+                        const edgeArray = [];
+                        const uvArray = [];
+                        for (let i = 0; i < vertices.length; i += vertexStride) {
+                            positionArray.push(
+                                ((left + vertices[i]) / scale) * R,
+                                R - ((top - vertices[i + 1]) / scale) * R,
+                                0
                             );
                             if (texCoordType !== undefined) {
-                                const i0 = triangles[i] * stride;
-                                const i1 = triangles[i + 1] * stride;
-                                const i2 = triangles[i + 2] * stride;
-                                geom.faceVertexUvs[0][i / 3] = [
-                                    new THREE.Vector2(points[i0 + 3], points[i0 + 4]),
-                                    new THREE.Vector2(points[i1 + 3], points[i1 + 4]),
-                                    new THREE.Vector2(points[i2 + 3], points[i2 + 4])
-                                ];
+                                uvArray.push(vertices[i + 2], vertices[i + 3]);
                             }
+                            edgeArray.push(vertices[i + featureStride]);
                         }
+
+                        const posAttr = new THREE.BufferAttribute(
+                            new Float32Array(positionArray),
+                            3
+                        );
+                        geom.addAttribute("position", posAttr);
+                        const edgeAttr = new THREE.BufferAttribute(new Float32Array(edgeArray), 1);
+                        geom.addAttribute("edge", edgeAttr);
+                        let uvAttr: THREE.BufferAttribute | undefined;
+                        if (texCoordType !== undefined) {
+                            uvAttr = new THREE.BufferAttribute(new Float32Array(uvArray), 2);
+                            geom.addAttribute("uv", uvAttr);
+                        }
+                        const indexAttr = new THREE.BufferAttribute(new Float32Array(triangles), 1);
+                        geom.setIndex(indexAttr);
 
                         // FIXME(HARP-5700): Subdivison modifer ignores texture coordinates.
                         const modifier = new SphericalGeometrySubdivisionModifier(
                             THREE.Math.degToRad(10),
                             mercatorProjection
                         );
-
                         modifier.modify(geom);
 
                         vertices.length = 0;
                         triangles.length = 0;
 
-                        geom.vertices.forEach(p => {
-                            this.projection.reprojectPoint(mercatorProjection, p, p);
-                            p.sub(this.m_decodeInfo.center);
-                            vertices.push(p.x, p.y, p.z);
+                        for (let i = 0; i < posAttr.array.length; i += 3) {
+                            vertices.push(
+                                (posAttr.array[i] / R) * scale - left,
+                                ((posAttr.array[i + 1] - R) * scale + R * top) / R
+                            );
                             if (texCoordType !== undefined) {
-                                vertices.push(0, 0);
+                                vertices.push(uvAttr!.array[(i / 3) * 2]);
+                                vertices.push(uvAttr!.array[(i / 3) * 2 + 1]);
                             }
-                        });
+                            vertices.push(edgeAttr.array[i / 3]);
+                        }
 
-                        geom.faces.forEach((face, i) => {
-                            const { a, b, c } = face;
-                            triangles.push(a, b, c);
-                            if (texCoordType !== undefined) {
-                                const vertexUvs = geom.faceVertexUvs[0][i];
-                                if (vertexUvs !== undefined) {
-                                    vertexUvs[0].toArray(vertices, a * stride + 3);
-                                    vertexUvs[1].toArray(vertices, b * stride + 3);
-                                    vertexUvs[2].toArray(vertices, c * stride + 3);
-                                }
-                            }
-                        });
+                        triangles.push(...(geom.getIndex().array as Float32Array));
                     }
 
                     // Add the footprint/roof vertices to the position buffer.
                     tempVertNormal.set(0, 0, 1);
-                    for (let i = 0; i < vertices.length; i += stride) {
+
+                    // Assemble the vertex buffer.
+                    const tmpVertex = new THREE.Vector3();
+                    for (let i = 0; i < vertices.length; i += vertexStride) {
+                        tmpVertex.set(
+                            ((left + vertices[i]) / scale) * R,
+                            R - ((top - vertices[i + 1]) / scale) * R,
+                            0
+                        );
+                        this.m_decodeInfo.targetProjection
+                            .reprojectPoint(mercatorProjection, tmpVertex, tmpVertex)
+                            .sub(this.m_decodeInfo.center);
+
                         let scaleFactor = 1.0;
                         if (isExtruded && constantHeight !== true) {
                             tempVertOrigin.set(
-                                tempTileOrigin.x + vertices[i],
-                                tempTileOrigin.y + vertices[i + 1],
-                                tempTileOrigin.z + vertices[i + 2]
+                                tempTileOrigin.x + tmpVertex.x,
+                                tempTileOrigin.y + tmpVertex.y,
+                                tempTileOrigin.z + tmpVertex.z
                             );
                             scaleFactor = this.m_decodeInfo.targetProjection.getScaleFactor(
                                 tempVertOrigin
@@ -968,7 +987,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
 
                         if (isSpherical) {
                             tempVertNormal
-                                .set(vertices[i], vertices[i + 1], vertices[i + 2])
+                                .set(tmpVertex.x, tmpVertex.y, tmpVertex.z)
                                 .add(this.center)
                                 .normalize();
                         }
@@ -976,19 +995,19 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                         tempFootDisp.copy(tempVertNormal).multiplyScalar(minHeight * scaleFactor);
                         tempRoofDisp.copy(tempVertNormal).multiplyScalar(height * scaleFactor);
                         positions.push(
-                            vertices[i] + tempFootDisp.x,
-                            vertices[i + 1] + tempFootDisp.y,
-                            vertices[i + 2] + tempFootDisp.z
+                            tmpVertex.x + tempFootDisp.x,
+                            tmpVertex.y + tempFootDisp.y,
+                            tmpVertex.z + tempFootDisp.z
                         );
                         if (texCoordType !== undefined) {
-                            textureCoordinates.push(vertices[i + 3], vertices[i + 4]);
+                            textureCoordinates.push(vertices[i + 2], vertices[i + 3]);
                         }
 
                         if (isExtruded) {
                             positions.push(
-                                vertices[i] + tempRoofDisp.x,
-                                vertices[i + 1] + tempRoofDisp.y,
-                                vertices[i + 2] + tempRoofDisp.z
+                                tmpVertex.x + tempRoofDisp.x,
+                                tmpVertex.y + tempRoofDisp.y,
+                                tmpVertex.z + tempRoofDisp.z
                             );
                             extrusionAxis.push(
                                 0,
@@ -999,7 +1018,10 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                                 tempRoofDisp.z - tempFootDisp.z
                             );
                             if (texCoordType !== undefined) {
-                                textureCoordinates.push(vertices[i + 3], vertices[i + 4]);
+                                textureCoordinates.push(vertices[i + 2], vertices[i + 3]);
+                            }
+                            if (extrudedPolygonTechnique.vertexColors === true) {
+                                colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
                             }
                         }
                     }
@@ -1009,43 +1031,128 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                         if (isExtruded) {
                             // When extruding we duplicate the vertices, so that all even vertices
                             // belong to the bottom and all odd vertices belong to the top.
-                            const i0 = baseVertex + triangles[i + 0] * 2 + 1;
-                            const i1 = baseVertex + triangles[i + 1] * 2 + 1;
-                            const i2 = baseVertex + triangles[i + 2] * 2 + 1;
+                            const i0 = polygonBaseVertex + triangles[i + 0] * 2 + 1;
+                            const i1 = polygonBaseVertex + triangles[i + 1] * 2 + 1;
+                            const i2 = polygonBaseVertex + triangles[i + 2] * 2 + 1;
                             indices.push(i0, i1, i2);
                         } else {
-                            const i0 = baseVertex + triangles[i + 0];
-                            const i1 = baseVertex + triangles[i + 1];
-                            const i2 = baseVertex + triangles[i + 2];
+                            const i0 = polygonBaseVertex + triangles[i + 0];
+                            const i1 = polygonBaseVertex + triangles[i + 1];
+                            const i2 = polygonBaseVertex + triangles[i + 2];
                             indices.push(i0, i1, i2);
                         }
+                    }
+
+                    // Assemble the index buffer (follow vertices as linked list).
+                    const tmpEdgeA = new THREE.Vector3();
+                    const tmpEdgeB = new THREE.Vector3();
+                    let firstRingVertex: number | undefined;
+                    let prevRingVertex: number | undefined;
+                    let currRingVertex = 0;
+                    let maxRingVertex = 0;
+                    while (currRingVertex < originalVertexCount) {
+                        while (currRingVertex !== firstRingVertex) {
+                            if (firstRingVertex === undefined) {
+                                firstRingVertex = currRingVertex;
+                            }
+                            if (currRingVertex < originalVertexCount) {
+                                maxRingVertex = Math.max(maxRingVertex, currRingVertex);
+                            }
+
+                            const nextRingVertex =
+                                vertices[currRingVertex * vertexStride + featureStride];
+                            if (nextRingVertex >= 0) {
+                                if (!isExtruded) {
+                                    if (hasEdges) {
+                                        edgeIndices.push(
+                                            polygonBaseVertex + currRingVertex,
+                                            polygonBaseVertex + nextRingVertex
+                                        );
+                                    }
+                                } else {
+                                    indices.push(
+                                        polygonBaseVertex + currRingVertex * 2,
+                                        polygonBaseVertex + currRingVertex * 2 + 1,
+                                        polygonBaseVertex + nextRingVertex * 2 + 1,
+                                        polygonBaseVertex + nextRingVertex * 2 + 1,
+                                        polygonBaseVertex + nextRingVertex * 2,
+                                        polygonBaseVertex + currRingVertex * 2
+                                    );
+                                    if (hasEdges) {
+                                        if (extrudedPolygonTechnique.footprint === true) {
+                                            edgeIndices.push(
+                                                polygonBaseVertex + currRingVertex * 2,
+                                                polygonBaseVertex + nextRingVertex * 2
+                                            );
+                                        }
+                                        edgeIndices.push(
+                                            polygonBaseVertex + currRingVertex * 2 + 1,
+                                            polygonBaseVertex + nextRingVertex * 2 + 1
+                                        );
+
+                                        if (extrudedPolygonTechnique.maxSlope !== undefined) {
+                                            if (prevRingVertex !== undefined) {
+                                                const prevPos =
+                                                    (polygonBaseVertex + prevRingVertex * 2) * 3;
+                                                const currPos =
+                                                    (polygonBaseVertex + currRingVertex * 2) * 3;
+                                                const nextPos =
+                                                    (polygonBaseVertex + nextRingVertex * 2) * 3;
+                                                tmpEdgeA
+                                                    .set(
+                                                        positions[currPos] - positions[prevPos],
+                                                        positions[currPos + 1] -
+                                                            positions[prevPos + 1],
+                                                        positions[currPos + 2] -
+                                                            positions[prevPos + 2]
+                                                    )
+                                                    .normalize();
+                                                tmpEdgeB
+                                                    .set(
+                                                        positions[nextPos] - positions[currPos],
+                                                        positions[nextPos + 1] -
+                                                            positions[currPos + 1],
+                                                        positions[nextPos + 2] -
+                                                            positions[currPos + 2]
+                                                    )
+                                                    .normalize();
+                                                if (
+                                                    tmpEdgeA.dot(tmpEdgeB) <=
+                                                    extrudedPolygonTechnique.maxSlope
+                                                ) {
+                                                    edgeIndices.push(
+                                                        polygonBaseVertex + currRingVertex * 2,
+                                                        polygonBaseVertex + currRingVertex * 2 + 1
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            edgeIndices.push(
+                                                polygonBaseVertex + currRingVertex * 2,
+                                                polygonBaseVertex + currRingVertex * 2 + 1
+                                            );
+                                        }
+                                    }
+                                }
+                                prevRingVertex = currRingVertex;
+                                currRingVertex = nextRingVertex;
+                            } else {
+                                break;
+                            }
+                        }
+                        currRingVertex = maxRingVertex + 1;
+                        firstRingVertex = undefined;
+                        prevRingVertex = undefined;
                     }
                 } catch (err) {
                     logger.error(`cannot triangulate geometry`, err);
                 }
             }
 
-            if (isExtrudedPolygonTechnique(technique) && technique.vertexColors === true) {
-                const positionCount = (positions.length - basePosition) / 3;
-                const color = new THREE.Color(
-                    technique.color !== undefined
-                        ? getPropertyValue(technique.color, this.m_decodeInfo.tileKey.level)
-                        : this.isColorStringValid(env.lookup("color") as string)
-                        ? (env.lookup("color") as string)
-                        : technique.defaultColor !== undefined
-                        ? getPropertyValue(technique.defaultColor, this.m_decodeInfo.tileKey.level)
-                        : 0x000000
-                );
-
-                for (let i = 0; i < positionCount; ++i) {
-                    colors.push(color.r, color.g, color.b);
-                }
-            }
-
-            const count = indices.length - start;
+            const count = indices.length - startIndexCount;
             if (count > 0) {
                 groups.push({
-                    start,
+                    start: startIndexCount,
                     count,
                     technique: techniqueIndex,
                     featureId

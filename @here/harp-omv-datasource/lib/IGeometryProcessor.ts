@@ -5,7 +5,7 @@
  */
 
 import { MapEnv } from "@here/harp-datasource-protocol/index-decoder";
-import { Vector3 } from "three";
+import { Vector2 } from "three";
 
 /**
 + *  An interface to represent inner and outer rings of a [[IPolygonGeometry]].
@@ -14,13 +14,7 @@ export interface IRing {
     /**
      * The [[GeoCoordinates]] of this [[IRing]].
      */
-    readonly positions: Vector3[];
-
-    /**
-     * Boolean array representing if the edges of this [[IRing]] should be considered as potential
-     * outlines.
-     */
-    readonly outlines?: boolean[];
+    readonly positions: Vector2[];
 }
 
 /**
@@ -40,7 +34,7 @@ export interface ILineGeometry {
     /**
      * The positions of this [[IlineGeometry]] projected in world space.
      */
-    readonly positions: Vector3[];
+    readonly positions: Vector2[];
 }
 
 /**
@@ -74,13 +68,15 @@ export interface IGeometryProcessor {
      * The points are represented as GeoCoordinates.
      *
      * @param layerName The name of the enclosing layer.
+     * @param layerExtents The extents of the enclosing layer.
      * @param geometry The positions of the point features in the projected world coordinates.
      * @param env The enviroment containing the properties of the geometry.
      * @param storageLevel The storage level of the data.
      */
     processPointFeature(
         layerName: string,
-        geometry: Vector3[],
+        layerExtents: number,
+        geometry: Vector2[],
         env: MapEnv,
         storageLevel: number
     ): void;
@@ -91,12 +87,14 @@ export interface IGeometryProcessor {
      * Each line is represented as an Array of GeoCoordinates.
      *
      * @param layerName The name of the enclosing layer.
+     * @param layerExtents The extents of the enclosing layer.
      * @param geometry The list of line geometries.
      * @param env The enviroment containing the properties of the geometry.
      * @param storageLevel The storage level of the data.
      */
     processLineFeature(
         layerName: string,
+        layerExtents: number,
         geometry: ILineGeometry[],
         env: MapEnv,
         storageLevel: number
@@ -109,12 +107,14 @@ export interface IGeometryProcessor {
      * exterior and interior rings.
      *
      * @param layerName The name of the enclosing layer.
+     * @param layerExtents The extents of the enclosing layer.
      * @param geometry The list of polygons.
      * @param env The enviroment containing the properties of the geometry.
      * @param storageLevel The storage level of the data.
      */
     processPolygonFeature(
         layerName: string,
+        layerExtents: number,
         geometry: IPolygonGeometry[],
         env: MapEnv,
         storageLevel: number

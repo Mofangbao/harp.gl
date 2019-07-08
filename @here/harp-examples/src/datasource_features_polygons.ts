@@ -10,7 +10,7 @@ import {
     MapViewFeature,
     MapViewMultiPolygonFeature
 } from "@here/harp-features-datasource";
-import { GeoCoordinates } from "@here/harp-geoutils";
+import { GeoCoordinates, sphereProjection } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
 import { CopyrightInfo, MapView } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
@@ -277,15 +277,13 @@ export namespace PolygonsFeaturesExample {
         const canvas = document.getElementById("mapCanvas") as HTMLCanvasElement;
         const mapView = new MapView({
             canvas,
-            theme: "resources/berlin_tilezen_night_reduced.json"
+            theme: "resources/berlin_tilezen_night_reduced.json",
+            projection: sphereProjection
         });
         mapView.setCameraGeolocationAndZoom(new GeoCoordinates(-25, 13), 3.9);
         mapView.renderLabels = false;
 
         const controls = new MapControls(mapView);
-        controls.setRotation(0, 28);
-        const ui = new MapControlsUI(controls);
-        canvas.parentElement!.appendChild(ui.domElement);
 
         window.addEventListener("resize", () => mapView.resize(innerWidth, innerHeight));
 
