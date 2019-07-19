@@ -398,7 +398,7 @@ export function getMaterialConstructor(technique: Technique): MaterialConstructo
             return DashedLineMaterial;
 
         case "fill":
-            return MapMeshBasicMaterial;
+            return MapMeshStandardMaterial;
 
         case "squares":
             return THREE.PointsMaterial;

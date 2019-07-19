@@ -9,6 +9,7 @@ import { MapView } from "../MapView";
 import { Tile } from "../Tile";
 import { Phase, PhasedTileGeometryLoader } from "./PhasedTileGeometryLoader";
 import { TileGeometryManagerBase } from "./TileGeometryManager";
+import { logger } from "@here/harp-datasource-protocol/index-decoder";
 
 /**
  * The default phases to load geometry.
@@ -59,6 +60,7 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
         this.updateTileObjectVisibility(tiles);
 
         if (!this.checkTilesFinished(tiles)) {
+            logger.error("Terrain: Not all tiles finished, calling update");
             this.mapView.update();
         }
     }

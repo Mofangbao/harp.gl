@@ -235,6 +235,9 @@ export abstract class TileGeometryManagerBase implements TileGeometryManager {
             tile.visibilityCounter = this.visibilityCounter;
 
             for (const object of tile.objects) {
+                if (!object.visible) {
+                    continue;
+                }
                 const geometryKind: GeometryKind[] | undefined =
                     object.userData !== undefined ? object.userData.kind : undefined;
                 if (geometryKind !== undefined) {

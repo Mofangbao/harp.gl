@@ -40,6 +40,7 @@ import { SphericalGeometrySubdivisionModifier } from "@here/harp-geometry/lib/Sp
 import { EarthConstants, GeoCoordinates, ProjectionType } from "@here/harp-geoutils";
 import {
     DashedLineMaterial,
+    DisplacementFeature,
     EdgeMaterial,
     EdgeMaterialParameters,
     FadingFeature,
@@ -195,11 +196,11 @@ export class TileGeometryCreator {
      * @param tile The [[Tile]] to process.
      * @param decodedTile The decodedTile containing the actual tile map data.
      */
-    createAllGeometries(tile: Tile, decodedTile: DecodedTile) {
+    createAllGeometries(tile: Tile, decodedTile: DecodedTile): boolean {
         tile.clear();
         this.preparePois(tile, decodedTile);
         this.createTextElements(tile, decodedTile);
-        this.createObjects(tile, decodedTile);
+        return this.createObjects(tile, decodedTile);
     }
 
     /**
@@ -530,6 +531,8 @@ export class TileGeometryCreator {
         const displayZoomLevel = Math.floor(mapView.zoomLevel);
         const objects = tile.objects;
 
+        let done = true;
+
         if (!tile.hasGeometry && dataSource.addTileBackground) {
             this.addGroundPlane(tile);
         }
@@ -553,7 +556,7 @@ export class TileGeometryCreator {
                 }
 
                 let count = group.count;
-                group.createdOffsets!.push(tile.offset);
+                //group.createdOffsets!.push(tile.offset);
 
                 // compress consecutive groups
                 for (
@@ -568,7 +571,7 @@ export class TileGeometryCreator {
                     count += groups[groupIndex].count;
 
                     // Mark this group as created, so it does not get processed again.
-                    groups[groupIndex].createdOffsets!.push(tile.offset);
+                    //groups[groupIndex].createdOffsets!.push(tile.offset);
                 }
 
                 const ObjectCtor = getObjectConstructor(technique);
@@ -914,6 +917,37 @@ export class TileGeometryCreator {
                     }
                 }
 
+                if (isFillTechnique(technique) && mapView.elevationProvider !== undefined) {
+                    const basicMaterial = material as MapMeshStandardMaterial;
+
+                    const displacementMap = mapView.elevationProvider.getDisplacementMap(
+                        tile.tileKey
+                    );
+                    if (displacementMap !== undefined) {
+                        logger.error("Tile got terrain: ", tile.tileKey);
+                        basicMaterial.map = new THREE.DataTexture(
+                            displacementMap.texture.texture,
+                            displacementMap.texture.width,
+                            displacementMap.texture.height,
+                            THREE.RGBAFormat,
+                            THREE.FloatType
+                        );
+                        basicMaterial.displacementMap = new THREE.DataTexture(
+                            displacementMap.texture.texture,
+                            displacementMap.texture.width,
+                            displacementMap.texture.height,
+                            THREE.LuminanceFormat,
+                            THREE.FloatType
+                        );
+                        basicMaterial.displacementScale = 0;
+                        basicMaterial.displacementBias = 10000;
+                        //DisplacementFeature.addRenderHelper(object);
+                    } else {
+                        done = false;
+                        logger.error("Tile waiting for terrain: ", tile.tileKey);
+                    }
+                }
+
                 const extrudedObjects: Array<{
                     object: THREE.Object3D;
                     /**
@@ -1171,6 +1205,7 @@ export class TileGeometryCreator {
                 }
             }
         }
+        return done;
     }
 
     /**

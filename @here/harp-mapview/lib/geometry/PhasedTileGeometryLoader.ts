@@ -18,6 +18,7 @@ import { PerformanceStatistics } from "../Statistics";
 import { Tile } from "../Tile";
 import { TileGeometryCreator } from "./TileGeometryCreator";
 import { TileGeometryLoader } from "./TileGeometryLoader";
+import { logger } from "@here/harp-datasource-protocol/index-decoder";
 
 /**
  * Describes the kinds of geometry that should be loaded in a single phase.
@@ -216,16 +217,22 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
             now = PerformanceTimer.now();
         }
 
+        let done = true;
         if (doFullUpdate) {
-            geometryCreator.createAllGeometries(tile, decodedTile);
-
-            // Mark it as finished.
-            this.m_currentPhaseIndex = loadPhaseDefinitions.length;
+            done = geometryCreator.createAllGeometries(tile, decodedTile);
+            if (done) {
+                // Mark it as finished.
+                this.m_currentPhaseIndex = loadPhaseDefinitions.length;
+            }
         } else {
             const currentPhaseDefinition = loadPhaseDefinitions[currentPhase];
 
             for (const kind of currentPhaseDefinition) {
-                this.createKind(geometryCreator, kind);
+                if (!this.createKind(geometryCreator, kind)) {
+                    done = false;
+                } else {
+                    logger.log("Que leches pasa aqui");
+                }
             }
         }
 
@@ -234,6 +241,10 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
                 "geometry.geometryCreationTime",
                 PerformanceTimer.now() - now
             );
+        }
+
+        if (!done) {
+            return false;
         }
 
         if (this.nextPhase() === undefined) {
@@ -298,10 +309,14 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
      * @param {TileGeometryCreator} geometryCreator
      * @param {GeometryKind} kindToCreate
      */
-    protected createKind(geometryCreator: TileGeometryCreator, kindToCreate: GeometryKind): void {
+    protected createKind(
+        geometryCreator: TileGeometryCreator,
+        kindToCreate: GeometryKind
+    ): boolean {
         if (this.m_geometryKindsLoaded.has(kindToCreate)) {
-            return;
+            return true;
         }
+        let done = true;
         this.m_geometryKindsLoaded.add(kindToCreate);
 
         const tile = this.tile;
@@ -334,7 +349,7 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
                 }
             };
 
-            geometryCreator.createObjects(tile, decodedTile, filter);
+            done = geometryCreator.createObjects(tile, decodedTile, filter);
 
             const textFilter = (technique: Technique): boolean => {
                 if (
@@ -353,6 +368,7 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
 
             geometryCreator.preparePois(tile, decodedTile);
         }
+        return done;
     }
 
     protected processTechniques(
@@ -383,5 +399,11 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
         this.m_decodedTile = undefined;
         this.m_tile.removeDecodedTile();
         this.m_isFinished = true;
+        if (
+            !this.m_tile.dataSource.name.localeCompare("Terrain") &&
+            this.m_tile.objects.length > 0
+        ) {
+            this.m_tile.objects[0].visible = false;
+        }
     }
 }
