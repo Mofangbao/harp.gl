@@ -25,8 +25,8 @@ describe("Expr", function() {
 
             const env = { str: "bar", n: 3 };
             assert.equal(evaluate("length(str)", env), 3);
-            assert.equal(evaluate("length(n)", env), undefined);
-            assert.equal(evaluate("length(1 == 1)"), undefined);
+            assert.throws(() => evaluate("length(n)", env));
+            assert.throws(() => evaluate("length(1 == 1)"));
 
             assert.throws(() => evaluate("length()"), "Syntax error");
         });
