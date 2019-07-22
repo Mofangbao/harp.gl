@@ -7,6 +7,7 @@
 import {
     ExtendedTileInfo,
     ExtendedTileInfoWriter,
+    FeatureGropeType,
     IndexedTechnique
 } from "@here/harp-datasource-protocol";
 import { MapEnv, StyleSetEvaluator } from "@here/harp-datasource-protocol/index-decoder";
@@ -75,7 +76,7 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
                     env,
                     featureId,
                     infoTileTechniqueIndex,
-                    false
+                    FeatureGropeType.Point
                 );
 
                 tileInfoWriter.addFeaturePoint(this.m_tileInfo.pointGroup, x, y);
@@ -123,7 +124,7 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
                     env,
                     featureId,
                     infoTileTechniqueIndex,
-                    false
+                    FeatureGropeType.Line
                 );
 
                 tileInfoWriter.addFeaturePoints(this.m_tileInfo.lineGroup, aLine);
@@ -194,7 +195,7 @@ export class OmvTileInfoEmitter implements IOmvEmitter {
                 env,
                 featureId,
                 infoTileTechniqueIndex,
-                true
+                FeatureGropeType.Polygon
             );
         }
 

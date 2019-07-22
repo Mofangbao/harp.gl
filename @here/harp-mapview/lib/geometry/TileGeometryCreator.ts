@@ -216,7 +216,7 @@ export class TileGeometryCreator {
         object: THREE.Object3D,
         geometryKind: GeometryKind | GeometryKindSet | undefined
     ) {
-        const userData = object.userData || {};
+        const userData = (object.userData = object.userData || {});
         userData.tileKey = tile.tileKey;
         userData.dataSource = tile.dataSource.name;
 
@@ -424,6 +424,7 @@ export class TileGeometryCreator {
                 textElement.mayOverlap = technique.mayOverlap === true;
                 textElement.reserveSpace = technique.reserveSpace !== false;
                 textElement.kind = technique.kind;
+                textElement.userData = textPath.objInfos;
 
                 tile.addTextElement(textElement);
             }
@@ -504,6 +505,10 @@ export class TileGeometryCreator {
 
                     textElement.fadeNear = fadeNear;
                     textElement.fadeFar = fadeFar;
+
+                    if (text.objInfos !== undefined) {
+                        textElement.userData = text.objInfos[i];
+                    }
 
                     tile.addTextElement(textElement);
                 }
