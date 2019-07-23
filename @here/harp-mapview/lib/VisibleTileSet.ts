@@ -7,6 +7,7 @@ import { OrientedBox3 } from "@here/harp-geometry";
 import { MathUtils, Projection, ProjectionType, TileKey, TilingScheme } from "@here/harp-geoutils";
 import { LRUCache } from "@here/harp-lrucache";
 import * as THREE from "three";
+import { ClipPlanesEvaluator } from "./ClipPlanesEvaluator";
 import { DataSource } from "./DataSource";
 import { CalculationStatus, ElevationRangeSource } from "./ElevationRangeSource";
 import { TileGeometryManager } from "./geometry/TileGeometryManager";
@@ -31,6 +32,11 @@ export interface VisibleTileSetOptions {
      * The projection of the view.
      */
     projection: Projection;
+
+    /**
+     * User-defined camera clipping planes evaluator.
+     */
+    clipPlanesEvaluator: ClipPlanesEvaluator;
 
     /**
      * Limit of tiles that can be visible per datasource.
