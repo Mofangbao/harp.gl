@@ -128,6 +128,34 @@ export namespace MapViewUtils {
      * Returns the [[GeoCoordinates]] of the camera, given its target coordinates on the map and its
      * zoom, yaw and pitch.
      *
+     * @param cameraCoordinates Coordinates of the center of the view.
+     * @param yawRad Camera yaw in radians.
+     * @param pitchRad Camera pitch in radians.
+     * @param mapView Active MapView, needed to get the map projection.
+     */
+    export function getViewCenterCoordinatesFromCameraCoordinates(
+        cameraCoordinates: geoUtils.GeoCoordinates,
+        yawRad: number,
+        pitchRad: number,
+        mapView: MapView
+    ): geoUtils.GeoCoordinates {
+        // Get the world distance between the camera and the target.
+        const worldPosition = mapView.projection.projectPoint(cameraCoordinates);
+        const groundDistance = mapView.camera.position.z * Math.tan(pitchRad);
+        const cameraLookAt = {
+            x: worldPosition.x - groundDistance * Math.sin(yawRad),
+            y: worldPosition.y + groundDistance * Math.cos(yawRad),
+            z: 0
+        };
+
+        // Convert back to GeoCoordinates and return result.
+        return mapView.projection.unprojectPoint(cameraLookAt);
+    }
+
+    /**
+     * Returns the [[GeoCoordinates]] of the camera, given its target coordinates on the map and its
+     * zoom, yaw and pitch.
+     *
      * @param targetCoordinates Coordinates of the center of the view.
      * @param distance Distance to the target in meters.
      * @param yawDeg Camera yaw in degrees.

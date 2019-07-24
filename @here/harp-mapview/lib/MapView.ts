@@ -103,7 +103,9 @@ export enum MapViewEventNames {
     /** Called when the WebGL context is lost. */
     ContextLost = "webglcontext-lost",
     /** Called when the WebGL context is restored. */
-    ContextRestored = "webglcontext-restored"
+    ContextRestored = "webglcontext-restored",
+    /** Called when camera position has been changed. */
+    CameraPositionChanged = "camera-update"
 }
 
 const logger = LoggerManager.instance.create("MapView");
@@ -151,7 +153,8 @@ export interface RenderEvent extends THREE.Event {
         | MapViewEventNames.MovementFinished
         | MapViewEventNames.ContextLost
         | MapViewEventNames.ContextRestored
-        | MapViewEventNames.CopyrightChanged;
+        | MapViewEventNames.CopyrightChanged
+        | MapViewEventNames.CameraPositionChanged;
     time?: number;
 }
 
@@ -1310,6 +1313,19 @@ export class MapView extends THREE.EventDispatcher {
     }
 
     /**
+     * The position in geo coordinates of the center of the view.
+     */
+    get getViewCenter() {
+        const { yaw, pitch } = MapViewUtils.extractYawPitchRoll(this.m_camera.quaternion);
+        return MapViewUtils.getViewCenterCoordinatesFromCameraCoordinates(
+            this.geoCenter,
+            yaw,
+            pitch,
+            this
+        );
+    }
+
+    /**
      * The node in this MapView's scene containing the user [[MapAnchor]]s.
      * All (first level) children of this node will be positioned in world space according to the
      * [[MapAnchor.geoPosition]].
@@ -2391,6 +2407,16 @@ export class MapView extends THREE.EventDispatcher {
         }
 
         this.m_movementDetector.checkCameraMoved(this, time);
+
+        if (this.m_movementDetector.cameraMovedLastFrame) {
+            const zoom = this.zoomLevel;
+            const { yaw, pitch } = MapViewUtils.extractYawPitchRoll(this.m_camera.quaternion);
+            const { latitude, longitude } = this.getViewCenter;
+            this.dispatchEvent({
+                type: MapViewEventNames.CameraPositionChanged,
+                cameraState: { latitude, longitude, zoom, yaw, pitch }
+            });
+        }
 
         // The camera used to render the scene.
         const camera = this.m_pointOfView !== undefined ? this.m_pointOfView : this.m_rteCamera;
