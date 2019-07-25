@@ -744,6 +744,24 @@
                 "final": true
             },
             {
+                "description": "North pole",
+                "when": ["==", ["get", "kind"], "north_pole"],
+                "technique": "fill",
+                "attr": {
+                    "color": "#436981"
+                },
+                "renderOrder": 5
+            },
+            {
+                "description": "South pole",
+                "when": ["==", ["get", "kind"], "south_pole"],
+                "technique": "fill",
+                "attr": {
+                    "color": "#87959a"
+                },
+                "renderOrder": 5
+            },
+            {
                 "description": "water",
                 "when": [
                     "all",

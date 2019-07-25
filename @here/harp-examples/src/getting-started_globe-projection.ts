@@ -6,7 +6,12 @@
 
 import { GeoCoordinates, sphereProjection } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightElementHandler, CopyrightInfo, MapView } from "@here/harp-mapview";
+import {
+    CopyrightElementHandler,
+    CopyrightInfo,
+    MapView,
+    PolarTileDataSource
+} from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import { accessToken } from "../config";
 
@@ -53,6 +58,11 @@ export namespace GlobeExample {
             copyrightInfo: copyrights
         });
 
+        const polarDataSource = new PolarTileDataSource({
+            styleSetName: "tilezen"
+        });
+
+        map.addDataSource(polarDataSource);
         map.addDataSource(omvDataSource);
 
         const mapControls = new MapControls(map);
