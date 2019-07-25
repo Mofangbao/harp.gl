@@ -2494,6 +2494,9 @@ export class MapView extends THREE.EventDispatcher {
                 }
                 object.position.x += worldOffsetX;
                 object.position.sub(this.m_camera.position);
+                if (tile.localTangentSpace) {
+                    object.setRotationFromMatrix(tile.boundingBox.getRotationMatrix());
+                }
                 this.m_mapTilesRoot.add(object);
             }
         }
