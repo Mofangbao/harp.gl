@@ -38,9 +38,19 @@ export namespace MapViewUtils {
 
     /**
      * Pitch rotation as quaternion. Declared as a const to avoid object re-creation in certain
-     *  functions.
+     * functions.
      */
     const pitchQuaternion = new THREE.Quaternion();
+
+    /**
+     * Cached quaternion for intermediate maths to avoid creating new instances.
+     */
+    const tmpQuaternion = new THREE.Quaternion();
+
+    /**
+     * Cached matrix for intermediate maths to avoid creating new instances.
+     */
+    const tmpMatrix = new THREE.Matrix4();
 
     /**
      * The yaw axis around we rotate when we change the yaw.
@@ -96,18 +106,44 @@ export namespace MapViewUtils {
         targetPositionOnScreenYinNDC: number,
         zoomLevel: number
     ): void {
-        //Get current target position in world space before we zoom.
+        // const surfaceNormal = mapView.projection.surfaceNormal(
+        //     mapView.camera.position,
+        //     new THREE.Vector3()
+        // );
+        //
+        // // TODO: HARP-5431 Use the elevation provider to find the ground distance
+        // // if terrain is enabled.
+        // mapView.camera.position.addScaledVector(
+        //     surfaceNormal,
+        //     ((this.zoomLevelTargeted - zoomLevel) / this.zoomLevelDeltaOnMouseWheel) *
+        //         mapView.projection.groundDistance(mapView.camera.position) *
+        //         0.05
+        // );
+        //
+        // // TODO: HARP-5430 Ensures that we don't intersect the terrain, a similar
+        // // approach to that should be used here, at least for consistency's sake.
+        // if (mapView.projection.groundDistance(mapView.camera.position) < 500) {
+        //     mapView.projection.scalePointToSurface(mapView.camera.position);
+        //     mapView.camera.position.addScaledVector(surfaceNormal, 500);
+        // }
+
+        // Get current target position in world space before we zoom.
         const targetPosition = rayCastWorldCoordinates(
             mapView,
             targetPositionOnScreenXinNDC,
             targetPositionOnScreenYinNDC
         );
+        const zoomDistance = calculateDistanceToGroundFromZoomLevel(mapView, zoomLevel);
 
-        //Set the cameras height according to the given zoom level.
-        mapView.camera.position.setZ(calculateDistanceToGroundFromZoomLevel(mapView, zoomLevel));
+        // Set the cameras height according to the given zoom level.
+        if (mapView.projection.type === geoUtils.ProjectionType.Planar) {
+            mapView.camera.position.setZ(zoomDistance);
+        } else if (mapView.projection.type === geoUtils.ProjectionType.Spherical) {
+            mapView.camera.position.setLength(EarthConstants.EQUATORIAL_RADIUS + zoomDistance);
+        }
         mapView.camera.matrixWorldNeedsUpdate = true;
 
-        //Get new target position after the zoom
+        // Get new target position after the zoom
         const newTargetPosition = rayCastWorldCoordinates(
             mapView,
             targetPositionOnScreenXinNDC,
@@ -118,10 +154,14 @@ export namespace MapViewUtils {
             return;
         }
 
-        //Calculate the difference and pan the map to maintain
-        //the map relative to the target position.
-        const diff = targetPosition.sub(newTargetPosition);
-        pan(mapView, diff.x, diff.y);
+        if (mapView.projection.type === geoUtils.ProjectionType.Planar) {
+            // Calculate the difference and pan the map to maintain the map relative to the target
+            // position.
+            targetPosition.sub(newTargetPosition);
+            pan(mapView, targetPosition.x, targetPosition.y);
+        } else if (mapView.projection.type === geoUtils.ProjectionType.Spherical) {
+            rotateGlobe(mapView, targetPosition, newTargetPosition);
+        }
     }
 
     /**
@@ -207,10 +247,9 @@ export namespace MapViewUtils {
     }
 
     /**
-     * Calculates and returns the distance from the ground,
-     * which is needed to put the camera to this
-     * height, to see the size of the area, which would be covered
-     * by one tile for the given zoom level.
+     * Calculates and returns the distance from the ground, which is needed to put the camera to
+     * this height, to see the size of the area that would be covered by one tile for the given zoom
+     * level.
      *
      * @param mapView Instance of MapView.
      * @param zoomLevel
@@ -219,8 +258,8 @@ export namespace MapViewUtils {
         mapView: MapView,
         zoomLevel: number
     ): number {
-        const cameraPitch = extractYawPitchRoll(mapView.camera.quaternion).pitch;
-
+        const cameraPitch = extractYawPitchRoll(mapView.camera.quaternion, mapView.projection.type)
+            .pitch;
         const tileSize = EarthConstants.EQUATORIAL_CIRCUMFERENCE / Math.pow(2, zoomLevel);
         return ((mapView.focalLength * tileSize) / 256) * Math.cos(cameraPitch);
     }
@@ -238,6 +277,23 @@ export namespace MapViewUtils {
         mapView.camera.position.x += offsetX;
         mapView.camera.position.y += offsetY;
         mapView.update();
+    }
+
+    /**
+     * The function doing a pan when [[MapView]]'s active [[ProjectionType]] is spherical.
+     *
+     * @param mapView MapView instance.
+     * @param fromWorld Start vector representing the scene position of a geolocation.
+     * @param toWorld End vector representing the scene position of a geolocation.
+     */
+    export function rotateGlobe(
+        mapView: MapView,
+        fromWorld: THREE.Vector3,
+        toWorld: THREE.Vector3
+    ) {
+        tmpQuaternion.setFromUnitVectors(fromWorld.normalize(), toWorld.normalize()).inverse();
+        tmpMatrix.copyPosition(mapView.camera.matrix).makeRotationFromQuaternion(tmpQuaternion);
+        mapView.camera.applyMatrix(tmpMatrix);
     }
 
     /**
@@ -270,26 +326,42 @@ export namespace MapViewUtils {
      * @param q : Quaternion that represents the given rotation
      * from which to extract the yaw, roll, and pitch.
      */
-    export function extractYawPitchRoll(q: THREE.Quaternion): YawPitchRoll {
-        const ysqr = q.y * q.y;
+    export function extractYawPitchRoll(
+        q: THREE.Quaternion,
+        projectionType: geoUtils.ProjectionType
+    ): YawPitchRoll {
+        if (projectionType === geoUtils.ProjectionType.Planar) {
+            const ysqr = q.y * q.y;
 
-        // pitch (x-axis rotation)
-        const t0 = +2.0 * (q.w * q.x + q.y * q.z);
-        const t1 = +1.0 - 2.0 * (q.x * q.x + ysqr);
-        const pitch = Math.atan2(t0, t1);
+            // pitch (x-axis rotation)
+            const t0 = +2.0 * (q.w * q.x + q.y * q.z);
+            const t1 = +1.0 - 2.0 * (q.x * q.x + ysqr);
+            const pitch = Math.atan2(t0, t1);
 
-        // roll (y-axis rotation)
-        let t2 = +2.0 * (q.w * q.y - q.z * q.x);
-        t2 = t2 > 1.0 ? 1.0 : t2;
-        t2 = t2 < -1.0 ? -1.0 : t2;
-        const roll = Math.asin(t2);
+            // roll (y-axis rotation)
+            let t2 = +2.0 * (q.w * q.y - q.z * q.x);
+            t2 = t2 > 1.0 ? 1.0 : t2;
+            t2 = t2 < -1.0 ? -1.0 : t2;
+            const roll = Math.asin(t2);
 
-        // yaw (z-axis rotation)
-        const t3 = +2.0 * (q.w * q.z + q.x * q.y);
-        const t4 = +1.0 - 2.0 * (ysqr + q.z * q.z);
-        const yaw = Math.atan2(t3, t4);
+            // yaw (z-axis rotation)
+            const t3 = +2.0 * (q.w * q.z + q.x * q.y);
+            const t4 = +1.0 - 2.0 * (ysqr + q.z * q.z);
+            const yaw = Math.atan2(t3, t4);
 
-        return { yaw, pitch, roll };
+            return { yaw, pitch, roll };
+        } else if (projectionType === geoUtils.ProjectionType.Spherical) {
+            return {
+                yaw: 0,
+                pitch: 0,
+                roll: 0
+            };
+        }
+        return {
+            yaw: 0,
+            pitch: 0,
+            roll: 0
+        };
     }
 
     /**
