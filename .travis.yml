@@ -1,5 +1,5 @@
 language: node_js
-dist: xenial
+dist: bionic
 node_js:
   - "10"
 cache:
@@ -14,31 +14,34 @@ branches:
     - master
     - release
 
+env:
+  - DETECT_CHROMEDRIVER_VERSION=true
+
 # upgrade yarn to a more recent version
 before_install:
   - curl -o- -L https://yarnpkg.com/install.sh | bash -s -- --version 1.13.0
   - export PATH="$HOME/.yarn/bin:$PATH"
+  - npm install codecov -g
 
 jobs:
   include:
     - name: "Test"
-      script: |
-        set -ex
-        npx ts-mocha -r tsconfig-paths/register ./test/*.ts
-        yarn run tslint
-        yarn run prettier
-        yarn run build-tests
-        npx ts-mocha -r tsconfig-paths/register ./@here/*/test/*.ts
-        yarn test-browser --headless-firefox
-        yarn test-browser --headless-chrome
-        #./scripts/test-npm-packages.sh
-        #git status # just in case test-npm-packages leaves some garbage
+      script:
+        - yarn pre-test
+        - yarn cov-test --forbid-only
+        - yarn build-tests
+        - yarn test-browser --headless-firefox
+        - yarn test-browser --headless-chrome
+        - ./scripts/test-npm-packages.sh
+
     - name: "Build & Deploy"
-      script: |
-        set -ex
-        yarn run build
-        yarn run typedoc
-      before_deploy: ./scripts/prepare_doc_deploy.sh
+      script:
+        - cross-env NODE_ENV=production yarn run build
+        - yarn run typedoc
+        - cross-env NODE_ENV=production yarn run build-www
+        - yarn prepare-doc-deploy
+        # debug: lerna publish expects clean workspace
+        - ./scripts/git-check-clean-workspace.sh
       deploy:
         - provider: script
           script: ./scripts/publish-packages.sh
@@ -62,7 +65,10 @@ jobs:
           upload-dir: docs
           region: us-east-1
           acl: public_read
+          cache_control: no-cache
           on:
             all_branches: true
             condition: $TRAVIS_BRANCH =~ ^master|release$
 
+after_success:
+ - codecov -f coverage/*.json

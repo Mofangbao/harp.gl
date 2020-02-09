@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Style, StyleSet } from "@here/harp-datasource-protocol";
+import { StyleDeclaration, StyleSet } from "@here/harp-datasource-protocol";
 import {
     FeaturesDataSource,
     MapViewFeature,
     MapViewMultiPolygonFeature
 } from "@here/harp-features-datasource";
-import { GeoCoordinates } from "@here/harp-geoutils";
+import { GeoCoordinates, sphereProjection } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightInfo, MapView } from "@here/harp-mapview";
+import { MapView } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import * as THREE from "three";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 import { COUNTRIES } from "../resources/countries";
 
 /**
@@ -47,10 +47,6 @@ import { COUNTRIES } from "../resources/countries";
  * and leaving mechanism, that adds and removes datasources.
  */
 export namespace PolygonsFeaturesExample {
-    // snippet:harp_demo_features_polygons_0.ts
-    const map = createBaseMap();
-    // end:harp_demo_features_polygons_0.ts
-
     const EU = getEuropeMemberStatesPerYear();
     const steps = Object.keys(EU.steps);
     const stepsNumber = steps.length;
@@ -62,6 +58,10 @@ export namespace PolygonsFeaturesExample {
         color: "#77ccff"
     });
     // end:harp_demo_features_polygons_1.ts
+
+    // snippet:harp_demo_features_polygons_0.ts
+    const map = createBaseMap();
+    // end:harp_demo_features_polygons_0.ts
 
     const addPromises: Array<Promise<void>> = [];
 
@@ -111,13 +111,14 @@ export namespace PolygonsFeaturesExample {
                 });
                 features.push(feature);
             }
-            const featuresDataSource = new FeaturesDataSource();
+            const featuresDataSource = new FeaturesDataSource({
+                name: `member-states-${j}`,
+                styleSetName: "geojson",
+                features,
+                maxGeometryHeight: 300000
+            });
             const addPromise = map.addDataSource(featuresDataSource);
             addPromises.push(addPromise);
-            addPromise.then(() => {
-                featuresDataSource.setStyleSet(styleSet);
-                featuresDataSource.add(...features);
-            });
             datasources.push(featuresDataSource);
             // end:harp_demo_features_polygons_2.ts
         }
@@ -246,13 +247,15 @@ export namespace PolygonsFeaturesExample {
             const max = options.thresholds[i];
             const min = i - 1 < 0 ? 0 : options.thresholds[i - 1];
             const propertyName = options.property;
-            const style: Style = {
+            const style: StyleDeclaration = {
                 description: "geoJson property-based style",
                 technique: "extruded-polygon",
-                when:
-                    `$geometryType == 'polygon'` +
-                    `&& ${propertyName} > ${min}` +
-                    `&& ${propertyName} <= ${max}`,
+                when: [
+                    "all",
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    [">", ["to-number", ["get", propertyName]], min],
+                    ["<=", ["to-number", ["get", propertyName]], max]
+                ],
                 attr: {
                     color: colorString,
                     transparent: true,
@@ -277,33 +280,66 @@ export namespace PolygonsFeaturesExample {
         const canvas = document.getElementById("mapCanvas") as HTMLCanvasElement;
         const mapView = new MapView({
             canvas,
-            theme: "resources/berlin_tilezen_night_reduced.json"
+            projection: sphereProjection,
+            theme: {
+                extends: "resources/berlin_tilezen_night_reduced.json",
+                definitions: {
+                    northPoleColor: {
+                        type: "color",
+                        value: "#3a3c3e"
+                    },
+                    southPoleColor: {
+                        type: "color",
+                        value: "#4a4d4e"
+                    }
+                },
+                styles: {
+                    geojson: styleSet,
+                    polar: [
+                        {
+                            description: "North pole",
+                            when: ["==", ["get", "kind"], "north_pole"],
+                            technique: "fill",
+                            attr: {
+                                color: ["ref", "northPoleColor"]
+                            },
+                            renderOrder: 5
+                        },
+                        {
+                            description: "South pole",
+                            when: ["==", ["get", "kind"], "south_pole"],
+                            technique: "fill",
+                            attr: {
+                                color: ["ref", "southPoleColor"]
+                            },
+                            renderOrder: 5
+                        }
+                    ]
+                }
+            },
+            target: new GeoCoordinates(40, 15),
+            zoomLevel: 3.2,
+            enableMixedLod: true
         });
-        mapView.setCameraGeolocationAndZoom(new GeoCoordinates(-25, 13), 3.9);
         mapView.renderLabels = false;
 
         const controls = new MapControls(mapView);
-        controls.setRotation(0, 28);
-        const ui = new MapControlsUI(controls);
+        controls.maxTiltAngle = 50;
+        controls.maxZoomLevel = 6;
+
+        const ui = new MapControlsUI(controls, { projectionSwitch: true });
         canvas.parentElement!.appendChild(ui.domElement);
 
         window.addEventListener("resize", () => mapView.resize(innerWidth, innerHeight));
 
-        const hereCopyrightInfo: CopyrightInfo = {
-            id: "here.com",
-            year: new Date().getFullYear(),
-            label: "HERE",
-            link: "https://legal.here.com/terms"
-        };
-        const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
-
         const baseMap = new OmvDataSource({
+            name: "basemap",
             baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
             apiFormat: APIFormat.XYZOMV,
             styleSetName: "tilezen",
             maxZoomLevel: 17,
             authenticationCode: accessToken,
-            copyrightInfo: copyrights
+            copyrightInfo
         });
         mapView.addDataSource(baseMap);
 

@@ -6,10 +6,10 @@
 
 import { GeoCoordinates } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightElementHandler, CopyrightInfo, MapView } from "@here/harp-mapview";
+import { CopyrightElementHandler, MapView, ThemeLoader } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import { GUI } from "dat.gui";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * This example copies the base example and adds a GUI allowing to switch between all the open-
@@ -26,12 +26,13 @@ export namespace ThemesExample {
         CopyrightElementHandler.install("copyrightNotice", map);
 
         const mapControls = new MapControls(map);
-        mapControls.maxPitchAngle = 50;
+        mapControls.maxTiltAngle = 50;
 
-        const NY = new GeoCoordinates(40.707, -74.01);
-        map.lookAt(NY, 5000, 50);
+        const moscow = new GeoCoordinates(55.7525631, 37.6234006);
+        map.lookAt(moscow, 3500, 50, 300);
+        map.zoomLevel = 16.1;
 
-        const ui = new MapControlsUI(mapControls);
+        const ui = new MapControlsUI(mapControls, { zoomLevel: "input", projectionSwitch: true });
         canvas.parentElement!.appendChild(ui.domElement);
 
         map.resize(window.innerWidth, window.innerHeight);
@@ -45,21 +46,13 @@ export namespace ThemesExample {
 
     const mapView = initializeMapView();
 
-    const hereCopyrightInfo: CopyrightInfo = {
-        id: "here.com",
-        year: new Date().getFullYear(),
-        label: "HERE",
-        link: "https://legal.here.com/terms"
-    };
-    const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
-
     const omvDataSource = new OmvDataSource({
         baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
         apiFormat: APIFormat.XYZOMV,
         styleSetName: "tilezen",
         maxZoomLevel: 17,
         authenticationCode: accessToken,
-        copyrightInfo: copyrights
+        copyrightInfo
     });
 
     mapView.addDataSource(omvDataSource);
@@ -76,14 +69,9 @@ export namespace ThemesExample {
     };
     gui.add(options, "theme", options.theme)
         .onChange((value: string) => {
-            fetch(value)
-                .then(response => {
-                    return response.json();
-                })
-                .then((theme: any) => {
-                    mapView.clearTileCache();
-                    mapView.theme = theme;
-                });
+            ThemeLoader.load(value).then(theme => {
+                mapView.theme = theme;
+            });
         })
         .setValue("resources/berlin_tilezen_base.json");
 }

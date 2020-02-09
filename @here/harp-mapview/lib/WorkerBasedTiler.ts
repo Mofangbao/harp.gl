@@ -79,6 +79,7 @@ export class WorkerBasedTiler implements ITiler {
                     targetServiceId: this.serviceId
                 }
             );
+
             this.m_serviceCreated = true;
         }
     }

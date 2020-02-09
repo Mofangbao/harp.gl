@@ -3,7 +3,7 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
-import { DecodedTile, getPropertyValue, isTextTechnique } from "@here/harp-datasource-protocol";
+import { getPropertyValue, isTextTechnique } from "@here/harp-datasource-protocol";
 import { TileKey } from "@here/harp-geoutils/lib/tiling/TileKey";
 import { DataSource, TextElement } from "@here/harp-mapview";
 import { debugContext } from "@here/harp-mapview/lib/DebugContext";
@@ -15,7 +15,7 @@ import {
 } from "@here/harp-text-canvas";
 import * as THREE from "three";
 
-import { TileGeometryCreator } from "../../harp-mapview/lib/geometry/TileGeometryCreator";
+import { TileGeometryCreator } from "@here/harp-mapview/lib/geometry/TileGeometryCreator";
 import { OmvTile } from "./OmvTile";
 
 const debugMaterial = new THREE.LineBasicMaterial({
@@ -67,10 +67,7 @@ export class OmvDebugLabelsTile extends OmvTile {
         super(dataSource, tileKey);
     }
 
-    setDecodedTile(decodedTile: DecodedTile) {
-        super.setDecodedTile(decodedTile);
-    }
-
+    /** @override */
     loadingFinished() {
         this.addLabelDebugInfo();
     }
@@ -122,6 +119,7 @@ export class OmvDebugLabelsTile extends OmvTile {
 
             let baseVertex = 0;
             const pointScale = this.mapView.pixelToWorld;
+            const worldOffsetX = this.computeWorldOffsetX();
 
             for (const textPath of this.preparedTextPaths) {
                 const technique = decodedTile.techniques[textPath.technique];
@@ -187,7 +185,7 @@ export class OmvDebugLabelsTile extends OmvTile {
                                         : Number(pathIndex).toString();
                                 const labelElement = new TextElement(
                                     ContextualArabicConverter.instance.convert(label),
-                                    new THREE.Vector3(x, y, z),
+                                    new THREE.Vector3(x + worldOffsetX, y, z),
                                     textRenderStyle,
                                     textLayoutStyle,
                                     getPropertyValue(technique.priority || 0, zoomLevel),
@@ -220,7 +218,7 @@ export class OmvDebugLabelsTile extends OmvTile {
             if (lineIndices.length > 0) {
                 lineGeometry.addGroup(0, lineIndices.length, 0);
 
-                lineGeometry.addAttribute(
+                lineGeometry.setAttribute(
                     "position",
                     new THREE.BufferAttribute(new Float32Array(linePositions), 3)
                 );
@@ -234,7 +232,7 @@ export class OmvDebugLabelsTile extends OmvTile {
             if (redPointIndices.length > 0) {
                 redPointGeometry.addGroup(0, redPointIndices.length, 0);
 
-                redPointGeometry.addAttribute(
+                redPointGeometry.setAttribute(
                     "position",
                     new THREE.BufferAttribute(new Float32Array(redPointPositions), 3)
                 );
@@ -250,7 +248,7 @@ export class OmvDebugLabelsTile extends OmvTile {
             if (blackPointIndices.length > 0) {
                 blackPointGeometry.addGroup(0, blackPointIndices.length, 0);
 
-                blackPointGeometry.addAttribute(
+                blackPointGeometry.setAttribute(
                     "position",
                     new THREE.BufferAttribute(new Float32Array(blackPointPositions), 3)
                 );

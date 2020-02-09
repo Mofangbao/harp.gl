@@ -20,7 +20,7 @@ const vertexShaderChunk = `
     }`;
 
 const vertexShaderChunk2 = `
-    #if ! defined( LAMBERT ) && ! defined( PHONG ) && ! defined( TOON ) && ! defined( PHYSICAL )
+    #if ! defined( LAMBERT ) && ! defined( PHONG ) && ! defined( TOON ) && ! defined( STANDARD )
         #ifndef USE_ENVMAP
             vec3 objectNormal = normalize( normal );
         #endif
@@ -299,8 +299,9 @@ export class OutlineEffect {
                 );
             }
         } else {
-            (object as THREE.Mesh).material = this.getOutlineMaterial((object as THREE.Mesh)
-                .material as THREE.Material);
+            (object as THREE.Mesh).material = this.getOutlineMaterial(
+                (object as THREE.Mesh).material as THREE.Material
+            );
         }
 
         this.m_originalOnBeforeRenders[object.uuid] = object.onBeforeRender;

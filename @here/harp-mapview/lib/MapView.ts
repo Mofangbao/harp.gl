@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import {
+    GeometryKind,
     GradientSky,
     ImageTexture,
     Light,
@@ -14,38 +15,54 @@ import {
 import {
     EarthConstants,
     GeoCoordinates,
-    MathUtils,
+    GeoCoordLike,
     mercatorProjection,
     Projection,
-    ProjectionType
+    ProjectionType,
+    TilingScheme
 } from "@here/harp-geoutils";
-import { assert, getOptionValue, LoggerManager, PerformanceTimer } from "@here/harp-utils";
+import {
+    assert,
+    getOptionValue,
+    LoggerManager,
+    LogLevel,
+    PerformanceTimer,
+    UriResolver
+} from "@here/harp-utils";
 import * as THREE from "three";
 
+import { ViewRanges } from "@here/harp-datasource-protocol/lib/ViewRanges";
 import { AnimatedExtrusionHandler } from "./AnimatedExtrusionHandler";
 import { BackgroundDataSource } from "./BackgroundDataSource";
 import { CameraMovementDetector } from "./CameraMovementDetector";
+import { ClipPlanesEvaluator, createDefaultClipPlanesEvaluator } from "./ClipPlanesEvaluator";
 import { IMapAntialiasSettings, IMapRenderingManager, MapRenderingManager } from "./composing";
 import { ConcurrentDecoderFacade } from "./ConcurrentDecoderFacade";
-import { CopyrightInfo } from "./CopyrightInfo";
+import { CopyrightInfo } from "./copyrights/CopyrightInfo";
 import { DataSource } from "./DataSource";
 import { ElevationProvider } from "./ElevationProvider";
 import { ElevationRangeSource } from "./ElevationRangeSource";
 import { FrustumIntersection } from "./FrustumIntersection";
+import { overlayOnElevation } from "./geometry/overlayOnElevation";
 import { PhasedTileGeometryManager } from "./geometry/PhasedTileGeometryManager";
 import { SimpleTileGeometryManager, TileGeometryManager } from "./geometry/TileGeometryManager";
 import { MapViewImageCache } from "./image/MapViewImageCache";
 import { MapViewFog } from "./MapViewFog";
 import { PickHandler, PickResult } from "./PickHandler";
 import { PoiManager } from "./poi/PoiManager";
+import { PoiRendererFactory } from "./poi/PoiRendererFactory";
 import { PoiTableManager } from "./poi/PoiTableManager";
+import { PolarTileDataSource } from "./PolarTileDataSource";
 import { ScreenCollisions, ScreenCollisionsDebug } from "./ScreenCollisions";
 import { ScreenProjector } from "./ScreenProjector";
 import { SkyBackground } from "./SkyBackground";
 import { FrameStats, PerformanceStatistics } from "./Statistics";
+import { FontCatalogLoader } from "./text/FontCatalogLoader";
+import { MapViewState } from "./text/MapViewState";
+import { TextCanvasFactory } from "./text/TextCanvasFactory";
 import { TextElement } from "./text/TextElement";
-import { TextElementsRenderer } from "./text/TextElementsRenderer";
-import { TextLayoutStyleCache, TextRenderStyleCache } from "./text/TextStyleCache";
+import { TextElementsRenderer, ViewUpdateCallback } from "./text/TextElementsRenderer";
+import { TextElementsRendererOptions } from "./text/TextElementsRendererOptions";
 import { createLight } from "./ThemeHelpers";
 import { ThemeLoader } from "./ThemeLoader";
 import { Tile } from "./Tile";
@@ -54,9 +71,15 @@ import { ResourceComputationType, VisibleTileSet, VisibleTileSetOptions } from "
 
 declare const process: any;
 
-// cache value, because access to process.env.NODE_ENV is SLOW!
+// Cache value, because access to process.env.NODE_ENV is SLOW!
 const isProduction = process.env.NODE_ENV === "production";
-
+if (isProduction) {
+    // In production: silence logging below error.
+    LoggerManager.instance.setLogLevelForAll(LogLevel.Error);
+} else {
+    // In dev: silence logging below log (silences "debug" and "trace" levels).
+    LoggerManager.instance.setLogLevelForAll(LogLevel.Log);
+}
 /**
  * An interface describing [[THREE.Object3D]]s anchored on given [[GeoCoordinates]].
  *
@@ -105,16 +128,21 @@ export enum MapViewEventNames {
     /** Called when the WebGL context is lost. */
     ContextLost = "webglcontext-lost",
     /** Called when the WebGL context is restored. */
-    ContextRestored = "webglcontext-restored"
+    ContextRestored = "webglcontext-restored",
+    /** Called when camera position has been changed. */
+    CameraPositionChanged = "camera-changed"
 }
 
 const logger = LoggerManager.instance.create("MapView");
-const DEFAULT_FONT_CATALOG = "./resources/fonts/Default_FontCatalog.json";
 const DEFAULT_CLEAR_COLOR = 0xefe9e1;
-const EYE_INVERSE = new THREE.Vector3(0, 0, -1);
 const DEFAULT_FOV_CALCULATION: FovCalculation = { type: "dynamic", fov: 40 };
+const DEFAULT_CAM_NEAR_PLANE = 0.1;
+const DEFAULT_CAM_FAR_PLANE = 4000000;
 const MAX_FIELD_OF_VIEW = 140;
 const MIN_FIELD_OF_VIEW = 10;
+export const MAX_TILT_ANGLE = 89;
+// All objects in fallback tiles are reduced by this amount.
+export const FALLBACK_RENDER_ORDER_OFFSET = 20000;
 
 const DEFAULT_MIN_ZOOM_LEVEL = 1;
 
@@ -139,6 +167,16 @@ const FRAME_RATE_RING_SIZE = 12;
 const FALLBACK_FRAME_RATE = 30;
 
 /**
+ * Zoom level to request terrain tiles for getting the height of the camera above terrain.
+ */
+const TERRAIN_ZOOM_LEVEL = 4;
+
+/**
+ * Style set used by [[PolarTileDataSource]] by default.
+ */
+const DEFAULT_POLAR_STYLE_SET_NAME = "polar";
+
+/**
  * The type of `RenderEvent`.
  */
 export interface RenderEvent extends THREE.Event {
@@ -158,6 +196,7 @@ export interface RenderEvent extends THREE.Event {
 }
 
 // Event type: cast needed to workaround wrong THREE.js typings.
+const UPDATE: RenderEvent = { type: MapViewEventNames.Update } as any;
 const RENDER_EVENT: RenderEvent = { type: MapViewEventNames.Render } as any;
 const DID_RENDER_EVENT: RenderEvent = { type: MapViewEventNames.AfterRender } as any;
 const FIRST_FRAME_EVENT: RenderEvent = { type: MapViewEventNames.FirstFrame } as any;
@@ -171,24 +210,10 @@ const CONTEXT_LOST_EVENT: RenderEvent = { type: MapViewEventNames.ContextLost } 
 const CONTEXT_RESTORED_EVENT: RenderEvent = { type: MapViewEventNames.ContextRestored } as any;
 const COPYRIGHT_CHANGED_EVENT: RenderEvent = { type: MapViewEventNames.CopyrightChanged } as any;
 
-const tmpVector = new THREE.Vector2();
-
-/**
- * Compute far plane distance. May be based on tilt. Is being called every frame.
- *
- * @param mapView The current [[MapView]] instance.
- * @param tilt Angle in degrees between the vertical vector (eye to ground) and view vector. The
- *             value of `0` is looking straight down. `90` is the "camera on the floor". `>90` is
- *             camera looking up.
- * @param defaultNearValue The value of near plane computed by the [[MapView]].
- * @param defaultFarValue The value of far plane computed by the [[MapView]].
- */
-export type FarPlaneEvaluator = (
-    mapView: MapView,
-    tilt: number,
-    defaultNearValue: number,
-    defaultFarValue: number
-) => { near: number; far: number };
+const cache = {
+    vector2: [new THREE.Vector2()],
+    vector3: [new THREE.Vector3()]
+};
 
 /**
  * Specifies how the FOV (Field of View) should be calculated.
@@ -225,9 +250,23 @@ export interface FovCalculation {
 }
 
 /**
+ * Hint for the WebGL implementation on which power mode to prefer.
+ *
+ * @see https://www.khronos.org/registry/webgl/specs/latest/1.0/#5.14.12
+ */
+export enum MapViewPowerPreference {
+    /** Default value. */
+    Default = "default",
+    /** Lower power mode, used to conserve energy. */
+    LowPower = "low-power",
+    /** Maximum performance. */
+    HighPerformance = "high-performance"
+}
+
+/**
  * User configuration for the [[MapView]].
  */
-export interface MapViewOptions {
+export interface MapViewOptions extends TextElementsRendererOptions {
     /**
      * The canvas element used to render the scene.
      */
@@ -242,7 +281,7 @@ export interface MapViewOptions {
      * Whether the native WebGL antialiasing should be enabled. It is better to disable it if the
      * MapView's MSAA is enabled.
      *
-     * @default `true`
+     * @default `true` for `pixelRatio` < `2.0`, `false` otherwise.
      */
     enableNativeWebglAntialias?: boolean;
 
@@ -251,11 +290,6 @@ export interface MapViewOptions {
      * the custom antialiasing is enabled.
      */
     customAntialiasSettings?: IMapAntialiasSettings;
-
-    /**
-     * The path to the font catalog file. Default is `./resources/fonts/Default_FontCatalog.json`.
-     */
-    fontCatalog?: string;
 
     /**
      * `Projection` used by the `MapView`.
@@ -268,14 +302,14 @@ export interface MapViewOptions {
      * The URL of the script that the decoder worker runs. The default URL is
      * `./decoder.bundle.js`.
      *
-     * Relative URLs are resolved to full URL using the document's base URL
+     * Relative URIs are resolved to full URL using the document's base URL
      * (see: https://www.w3.org/TR/WD-html40-970917/htmlweb.html#h-5.1.2).
      */
     decoderUrl?: string;
 
     /**
      * The number of Web Workers used to decode data. The default is
-     * CLAMP(`navigator.hardwareConcurrency` - 1, 1, 4).
+     * CLAMP(`navigator.hardwareConcurrency` - 1, 1, 2).
      */
     decoderCount?: number;
 
@@ -283,7 +317,7 @@ export interface MapViewOptions {
      * The [[Theme]] used by Mapview.
      *
      * This Theme can be one of the following:
-     *  - `string` : the URL of the theme file used to style this map
+     *  - `string` : the URI of the theme file used to style this map
      *  - `Theme` : the `Theme` object already loaded
      *  - `Promise<Theme>` : the future `Theme` object
      *  - `undefined` : the theme is not yet set up, but can be set later. Rendering waits until
@@ -291,10 +325,38 @@ export interface MapViewOptions {
      *
      * **Note:** Layers that use a theme do not render any content until that theme is available.
      *
-     * Relative URLs are resolved to full URL using the document's base URL
+     * Relative URIs are resolved to full URL using the document's base URL
      * (see: https://www.w3.org/TR/WD-html40-970917/htmlweb.html#h-5.1.2).
+     *
+     * Custom URIs (of theme itself and of resources referenced by theme) may be resolved with help
+     * of [[uriResolver]].
+     *
+     * @see [[ThemeLoader.load]] for details how theme is loaded
      */
     theme?: string | Theme | Promise<Theme>;
+
+    /**
+     * Resolve `URI` referenced in `MapView` assets using this resolver.
+     *
+     * Use, to support application/deployment specific `URI`s into actual `URLs` that can be loaded
+     * with `fetch`.
+     *
+     * Example:
+     * ```
+     * uriResolver: new PrefixMapUriResolver({
+     *     "local://poiMasterList": "/assets/poiMasterList.json",
+     *        // will match only 'local//:poiMasterList' and
+     *        // resolve to `/assets/poiMasterList.json`
+     *     "local://icons/": "/assets/icons/"
+     *        // will match only 'local//:icons/ANYPATH' (and similar) and
+     *        // resolve to `/assets/icons/ANYPATH`
+     * })
+     * ```
+     *
+     * @see [[UriResolver]]
+     * @See [[PrefixMapUriResolver]]
+     */
+    uriResolver?: UriResolver;
 
     /**
      * The minimum zoom level; default is `1`.
@@ -312,9 +374,12 @@ export interface MapViewOptions {
     maxZoomLevel?: number;
 
     /**
-     * User-defined far plane distance calculator.
+     * User-defined camera clipping planes distance evaluator.
+     * If not defined, [[TiltViewClipPlanesEvaluator]] will be used by [[MapView]].
+     *
+     * @default [[TiltViewClipPlanesEvaluator]]
      */
-    farPlaneEvaluator?: FarPlaneEvaluator;
+    clipPlanesEvaluator?: ClipPlanesEvaluator;
 
     /**
      * Set to true to extend the frustum culling. This improves the rejection of some tiles, which
@@ -354,7 +419,7 @@ export interface MapViewOptions {
      *
      * To disable a cache search, set the value to `0`.
      *
-     * @default [[MapViewDefaults.tileLowLevelDetailFallback]]
+     * @default [[MapViewDefaults.quadTreeSearchDistanceUp]]
      */
     quadTreeSearchDistanceUp?: number;
 
@@ -367,7 +432,7 @@ export interface MapViewOptions {
      *
      * To disable a cache search, set the value to `0`.
      *
-     * @default [[MapViewDefaults.tileHighLevelDetailFallback]]
+     * @default [[MapViewDefaults.quadTreeSeaFIX]]
      */
     quadTreeSearchDistanceDown?: number;
 
@@ -393,54 +458,14 @@ export interface MapViewOptions {
     enableRoadPicking?: boolean;
 
     /**
+     * Set to `true` to allow picking of technique information associated with objects.
+     */
+    enablePickTechnique?: boolean;
+
+    /**
      * An optional canvas element that renders 2D collision debug information.
      */
     collisionDebugCanvas?: HTMLCanvasElement;
-
-    /**
-     * Optional initial number of glyphs (characters) for labels. In situations with limited,
-     * available memory, decreasing this number may be beneficial.
-     *
-     * @default `1024`
-     */
-    minNumGlyphs?: number;
-
-    /**
-     * Optional limit of number of glyphs (characters) for labels. In situations with limited,
-     * available memory, decreasing this number may be beneficial.
-     *
-     * @default `32768`
-     */
-    maxNumGlyphs?: number;
-
-    /**
-     * Limits the number of [[DataSource]] labels visible, such as road names and POIs.
-     * On small devices, you can reduce this number to to increase performance.
-     * @default `500`.
-     */
-    maxNumVisibleLabels?: number;
-
-    /**
-     * The number of [[TextElement]]s that the [[TextElementsRenderer]] tries to render even
-     * if they were not visible during placement. This property only applies to [[TextElement]]s
-     * that were culled by the frustum; useful for map movements and animations.
-     * @default `300`.
-     */
-    numSecondChanceLabels?: number;
-
-    /**
-     * The maximum distance for [[TextElement]] and icons, expressed as a fraction of the distance
-     * between the near and far plane [0, 1.0].
-     * @default `0.99`.
-     */
-    maxDistanceRatioForLabels?: number;
-
-    /**
-     * The distance at which [[TextElement]]s start to apply their `distanceScale` value, expressed
-     * as a fraction of the distance between the near and far plane [0, 1.0].
-     * @default `0.4`.
-     */
-    labelStartScaleDistance?: number;
 
     /**
      * Maximum timeout, in milliseconds, before a [[MOVEMENT_FINISHED_EVENT]] is sent after the
@@ -502,15 +527,102 @@ export interface MapViewOptions {
      * Enable phased loading. If `false`, the geometry on a [[Tile]] is always being created in a
      * single step, instead of (potentially) over multiple frames to smoothen animations.
      *
-     * @default `true`
+     * @default `false`
      */
     enablePhasedLoading?: boolean;
 
     /**
-     * @hidden
-     * Disable all fading animations for debugging and performance measurement.
+     * Enable map repeat for planar projections.
+     * If `true`, map will be repeated in longitudinal direction continuously.
+     * If `false`, map will end on lon -180 & 180 deg.
+     *
+     * @default `true`
      */
-    disableFading?: boolean;
+    tileWrappingEnabled?: boolean;
+
+    /**
+     * Set tiling scheme for [[BackgroundDataSource]]
+     */
+    backgroundTilingScheme?: TilingScheme;
+
+    /**
+     * Should be the [[PolarTileDataSource]] used on spherical projection.
+     * Default is `true`.
+     */
+    enablePolarDataSource?: boolean;
+
+    /**
+     * The name of the [[StyleSet]] used by [[PolarTileDataSource]] to evaluate for the decoding.
+     * Default is `"polar"`.
+     */
+    polarStyleSetName?: string;
+
+    /**
+     * Storage level offset of regular tiles from reference datasource to align
+     * [[PolarTileDataSource]] tiles to.
+     * Default is `-1`.
+     */
+    polarGeometryLevelOffset?: number;
+
+    /**
+     * Hint for the WebGL implementation on which power mode to prefer.
+     */
+    powerPreference?: MapViewPowerPreference;
+
+    /**
+     * Set to `true` to allow rendering scene synchronously.
+     *
+     * By calling `renderSync()` scene draws immediately, opposite to default case when
+     * `update` method requests redraw and waits for the next animation frame.
+     *
+     * You need to set up your own render loop controller.
+     * Event `MapViewEventNames.Update` fired when [[MapView]] requests for an redraw.
+     * E.g.: When tiles loaded asynchronously and ready for rendering.
+     *
+     * @note Internal `maxFps` will be overridden and may not work properly as `renderSync`
+     * intended to be called from external render loop.
+     *
+     * @default false.
+     */
+    synchronousRendering?: boolean;
+
+    /**
+     * Set initial camera target in geo coordinates.
+     *
+     * Longitude values outside of -180 and +180 are acceptable.
+     * @default new GeoCoordinates(25, 0)
+     */
+    target?: GeoCoordLike;
+
+    /**
+     * Set initial zoom level.
+     *
+     * @default 12
+     */
+    zoomLevel?: number;
+
+    /**
+     * Set initial camera heading in degrees.
+     *
+     * @default 0
+     */
+    heading?: number;
+
+    /**
+     * Set initial camera tilt in degrees.
+     *
+     * @default 0
+     */
+    tilt?: number;
+
+    /**
+     * Set true to enable rendering mixed levels of detail (increases rendering performance).
+     * If not set will enable mixed levels of detail for spherical projection
+     * and disable for other projections.
+     *
+     * @default undefined
+     */
+    enableMixedLod?: boolean;
 }
 
 /**
@@ -519,10 +631,10 @@ export interface MapViewOptions {
 export const MapViewDefaults = {
     projection: mercatorProjection,
 
-    maxVisibleDataSourceTiles: 120,
+    maxVisibleDataSourceTiles: 100,
     extendedFrustumCulling: true,
 
-    tileCacheSize: 20,
+    tileCacheSize: 200,
     resourceComputationType: ResourceComputationType.EstimationInMb,
     quadTreeSearchDistanceUp: 3,
     quadTreeSearchDistanceDown: 2,
@@ -530,7 +642,13 @@ export const MapViewDefaults = {
     pixelRatio:
         typeof window !== "undefined" && window.devicePixelRatio !== undefined
             ? window.devicePixelRatio
-            : 1.0
+            : 1.0,
+    geoCenter: new GeoCoordinates(25, 0, 30000000),
+    target: new GeoCoordinates(25, 0),
+    zoomLevel: 5,
+    tilt: 0,
+    heading: 0,
+    theme: {}
 };
 
 /**
@@ -538,17 +656,7 @@ export const MapViewDefaults = {
  * linked to datasources.
  */
 export class MapView extends THREE.EventDispatcher {
-    /**
-     * The string of the default font catalog to use for labelling.
-     */
-    defaultFontCatalog: string = DEFAULT_FONT_CATALOG;
-
     dumpNext = false;
-
-    /**
-     * Allows discarding the text rendering after the map rendering.
-     */
-    renderLabels: boolean = true;
 
     /**
      * The instance of [[MapRenderingManager]] managing the rendering of the map. It is a public
@@ -557,6 +665,9 @@ export class MapView extends THREE.EventDispatcher {
      */
     readonly mapRenderingManager: IMapRenderingManager;
 
+    private m_renderLabels: boolean = true;
+
+    private m_movementFinishedUpdateTimerId?: any;
     private m_postEffects?: PostEffects;
 
     private m_skyBackground?: SkyBackground;
@@ -573,6 +684,8 @@ export class MapView extends THREE.EventDispatcher {
     private m_elevationProvider?: ElevationProvider;
     private m_visibleTileSetLock: boolean = false;
     private m_tileGeometryManager: TileGeometryManager;
+
+    private m_tileWrappingEnabled: boolean = true;
 
     private m_zoomLevel: number = DEFAULT_MIN_ZOOM_LEVEL;
     private m_minZoomLevel: number = DEFAULT_MIN_ZOOM_LEVEL;
@@ -592,10 +705,18 @@ export class MapView extends THREE.EventDispatcher {
     private readonly m_rteCamera = new THREE.PerspectiveCamera();
 
     private m_focalLength: number;
-    private m_lookAtDistance: number;
+    private m_targetDistance: number;
+    private m_targetGeoPos = MapViewDefaults.target.clone();
+    // Focus point world coords may be calculated after setting projection, use dummy value here.
+    private m_targetWorldPos = new THREE.Vector3();
+    private readonly m_viewRanges: ViewRanges = {
+        near: DEFAULT_CAM_NEAR_PLANE,
+        far: DEFAULT_CAM_FAR_PLANE,
+        minimum: DEFAULT_CAM_NEAR_PLANE,
+        maximum: DEFAULT_CAM_FAR_PLANE
+    };
     private m_pointOfView?: THREE.PerspectiveCamera;
 
-    private m_tempVector3: THREE.Vector3 = new THREE.Vector3();
     private m_pixelToWorld?: number;
     private m_pixelRatio?: number;
 
@@ -613,10 +734,7 @@ export class MapView extends THREE.EventDispatcher {
     private m_maxFps = 0;
     private m_detectedFps: number = FALLBACK_FRAME_RATE;
 
-    private m_textElementsRenderer?: TextElementsRenderer;
-    private m_textRenderStyleCache = new TextRenderStyleCache();
-    private m_textLayoutStyleCache = new TextLayoutStyleCache();
-    private m_overlayTextElements?: TextElement[] = [];
+    private m_textElementsRenderer: TextElementsRenderer;
 
     private m_forceCameraAspect: number | undefined = undefined;
 
@@ -626,7 +744,9 @@ export class MapView extends THREE.EventDispatcher {
     private readonly m_tileDataSources: DataSource[] = [];
     private readonly m_connectedDataSources = new Set<string>();
     private readonly m_failedDataSources = new Set<string>();
-    private m_backgroundDataSource: BackgroundDataSource | undefined = undefined;
+    private m_backgroundDataSource?: BackgroundDataSource;
+    private m_polarDataSource?: PolarTileDataSource;
+    private m_enablePolarDataSource: boolean = true;
 
     // gestures
     private readonly m_raycaster = new THREE.Raycaster();
@@ -637,10 +757,13 @@ export class MapView extends THREE.EventDispatcher {
     private readonly m_visibleTileSetOptions: VisibleTileSetOptions;
 
     private m_theme: Theme = {};
+    private m_uriResolver?: UriResolver;
+    private m_themeIsLoading: boolean = false;
 
     private m_previousFrameTimeStamp?: number;
     private m_firstFrameRendered = false;
     private m_firstFrameComplete = false;
+    private m_initialTextPlacementDone = false;
     private m_previousRequestAnimationTime?: number;
     private m_targetRequestAnimationTime?: number;
     private m_frameTimeIndex: number = 0;
@@ -666,8 +789,9 @@ export class MapView extends THREE.EventDispatcher {
     private m_lastTileIds: string = "";
     private m_languages: string[] | undefined;
     private m_copyrightInfo: CopyrightInfo[] = [];
-
     private m_animatedExtrusionHandler: AnimatedExtrusionHandler;
+
+    private m_enableMixedLod: boolean | undefined;
 
     /**
      * Constructs a new `MapView` with the given options or canvas element.
@@ -679,6 +803,8 @@ export class MapView extends THREE.EventDispatcher {
 
         // make a copy to avoid unwanted changes to the original options.
         this.m_options = { ...options };
+
+        this.m_uriResolver = this.m_options.uriResolver;
 
         if (this.m_options.minZoomLevel !== undefined) {
             this.m_minZoomLevel = this.m_options.minZoomLevel;
@@ -692,19 +818,23 @@ export class MapView extends THREE.EventDispatcher {
             this.m_minCameraHeight = this.m_options.minCameraHeight;
         }
 
-        if (this.m_options.fontCatalog !== undefined) {
-            this.defaultFontCatalog = this.m_options.fontCatalog;
-        }
-
         if (this.m_options.decoderUrl !== undefined) {
-            ConcurrentDecoderFacade.defaultScriptUrl = this.m_options.decoderUrl;
+            ConcurrentDecoderFacade.defaultScriptUrl = this.m_uriResolver
+                ? this.m_uriResolver.resolveUri(this.m_options.decoderUrl)
+                : this.m_options.decoderUrl;
         }
 
         if (this.m_options.decoderCount !== undefined) {
             ConcurrentDecoderFacade.defaultWorkerCount = this.m_options.decoderCount;
         }
 
-        this.m_visibleTileSetOptions = { ...MapViewDefaults };
+        this.m_visibleTileSetOptions = {
+            ...MapViewDefaults,
+            clipPlanesEvaluator:
+                options.clipPlanesEvaluator !== undefined
+                    ? options.clipPlanesEvaluator
+                    : createDefaultClipPlanesEvaluator()
+        };
 
         if (options.projection !== undefined) {
             this.m_visibleTileSetOptions.projection = options.projection;
@@ -737,6 +867,10 @@ export class MapView extends THREE.EventDispatcher {
                 options.quadTreeSearchDistanceDown;
         }
 
+        if (options.enablePolarDataSource !== undefined) {
+            this.m_enablePolarDataSource = options.enablePolarDataSource;
+        }
+
         this.m_pixelRatio = options.pixelRatio;
 
         if (options.maxFps !== undefined) {
@@ -761,18 +895,30 @@ export class MapView extends THREE.EventDispatcher {
         this.m_pickHandler = new PickHandler(
             this,
             this.m_rteCamera,
-            this.m_options.enableRoadPicking === true
+            this.m_options.enableRoadPicking === true,
+            this.m_options.enablePickTechnique === true
         );
+
+        if (this.m_options.tileWrappingEnabled !== undefined) {
+            this.m_tileWrappingEnabled = this.m_options.tileWrappingEnabled;
+        }
 
         // Initialization of the stats
         this.setupStats(this.m_options.enableStatistics);
 
+        this.canvas.addEventListener("webglcontextlost", this.onWebGLContextLost);
+        this.canvas.addEventListener("webglcontextrestored", this.onWebGLContextRestored);
+
         // Initialization of the renderer
         this.m_renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
-            antialias: this.m_options.enableNativeWebglAntialias !== false,
+            antialias: this.nativeWebglAntialiasEnabled,
             alpha: this.m_options.alpha,
-            preserveDrawingBuffer: this.m_options.preserveDrawingBuffer === true
+            preserveDrawingBuffer: this.m_options.preserveDrawingBuffer === true,
+            powerPreference:
+                this.m_options.powerPreference === undefined
+                    ? MapViewPowerPreference.Default
+                    : this.m_options.powerPreference
         });
         this.m_renderer.autoClear = false;
 
@@ -787,7 +933,7 @@ export class MapView extends THREE.EventDispatcher {
             this.m_options.fovCalculation === undefined
                 ? DEFAULT_FOV_CALCULATION
                 : this.m_options.fovCalculation;
-        this.m_options.fovCalculation.fov = MathUtils.clamp(
+        this.m_options.fovCalculation.fov = THREE.Math.clamp(
             this.m_options.fovCalculation!.fov,
             MIN_FIELD_OF_VIEW,
             MAX_FIELD_OF_VIEW
@@ -798,16 +944,18 @@ export class MapView extends THREE.EventDispatcher {
         this.m_camera = new THREE.PerspectiveCamera(
             this.m_options.fovCalculation.fov,
             aspect,
-            0.1,
-            4000000
+            DEFAULT_CAM_NEAR_PLANE,
+            DEFAULT_CAM_FAR_PLANE
         );
         this.m_camera.up.set(0, 0, 1);
-        this.m_lookAtDistance = 0;
+        this.projection.projectPoint(this.m_targetGeoPos, this.m_targetWorldPos);
         this.m_focalLength = 0;
         this.m_scene.add(this.m_camera); // ensure the camera is added to the scene.
         this.m_screenProjector = new ScreenProjector(this.m_camera);
 
-        this.setupCamera();
+        // setup camera with initial position
+        this.setupCamera(options);
+        this.m_targetDistance = this.m_camera.position.distanceTo(this.m_targetWorldPos);
 
         this.m_movementDetector = new CameraMovementDetector(
             this.m_options.movementThrottleTimeout,
@@ -824,55 +972,66 @@ export class MapView extends THREE.EventDispatcher {
         );
 
         this.m_tileGeometryManager =
-            this.m_options.enablePhasedLoading === false
-                ? new SimpleTileGeometryManager(this)
-                : new PhasedTileGeometryManager(this);
+            this.m_options.enablePhasedLoading === true
+                ? new PhasedTileGeometryManager(this)
+                : new SimpleTileGeometryManager(this);
 
-        this.m_visibleTiles = new VisibleTileSet(
-            new FrustumIntersection(
-                this.m_camera,
-                this.m_visibleTileSetOptions.projection,
-                this.m_visibleTileSetOptions.extendedFrustumCulling
-            ),
-            this.m_tileGeometryManager,
-            this.m_visibleTileSetOptions
-        );
+        if (options.enableMixedLod !== undefined) {
+            this.m_enableMixedLod = options.enableMixedLod;
+        }
+        this.m_visibleTiles = this.createVisibleTileSet();
 
         this.m_animatedExtrusionHandler = new AnimatedExtrusionHandler(this);
 
         this.m_backgroundDataSource = new BackgroundDataSource();
         this.addDataSource(this.m_backgroundDataSource);
 
+        if (this.m_enablePolarDataSource) {
+            const styleSetName =
+                options.polarStyleSetName !== undefined
+                    ? options.polarStyleSetName
+                    : DEFAULT_POLAR_STYLE_SET_NAME;
+
+            this.m_polarDataSource = new PolarTileDataSource({
+                styleSetName,
+                geometryLevelOffset: options.polarGeometryLevelOffset
+            });
+
+            this.updatePolarDataSource();
+        }
+
+        if (options.backgroundTilingScheme !== undefined) {
+            this.m_backgroundDataSource.setTilingScheme(options.backgroundTilingScheme);
+        }
+
         this.initTheme();
 
-        this.drawFrame();
+        this.m_textElementsRenderer = this.createTextRenderer();
 
-        this.canvas.addEventListener("webglcontextlost", this.onWebGLContextLost);
-        this.canvas.addEventListener("webglcontextrestored", this.onWebGLContextRestored);
+        this.drawFrame();
+    }
+
+    /**
+     * @returns Whether label rendering is enabled.
+     */
+    get renderLabels() {
+        return this.m_renderLabels;
+    }
+
+    /**
+     * Enables or disables rendering of labels.
+     * @param value `true` to enable labels `false` to disable them.
+     */
+    set renderLabels(value: boolean) {
+        this.m_renderLabels = value;
     }
 
     /**
      * @hidden
      * The [[TextElementsRenderer]] select the visible [[TextElement]]s and renders them.
      */
-    get textElementsRenderer(): TextElementsRenderer | undefined {
+    get textElementsRenderer(): TextElementsRenderer {
         return this.m_textElementsRenderer;
-    }
-
-    /**
-     * @hidden
-     * The [[TextRenderStyleCache]] used for this instance of `MapView`.
-     */
-    get textRenderStyleCache(): TextRenderStyleCache {
-        return this.m_textRenderStyleCache;
-    }
-
-    /**
-     * @hidden
-     * The [[TextLayoutStyleCache]] used for this instance of `MapView`.
-     */
-    get textLayoutStyleCache(): TextLayoutStyleCache {
-        return this.m_textLayoutStyleCache;
     }
 
     /**
@@ -900,6 +1059,22 @@ export class MapView extends THREE.EventDispatcher {
         return this.m_tileGeometryManager;
     }
 
+    get enableMixedLod(): boolean | undefined {
+        return this.m_enableMixedLod;
+    }
+
+    set enableMixedLod(enableMixedLod: boolean | undefined) {
+        // Skip unnecessary update
+        if (this.m_enableMixedLod === enableMixedLod) {
+            return;
+        }
+
+        this.m_enableMixedLod = enableMixedLod;
+        this.m_visibleTiles = this.createVisibleTileSet();
+        this.resetTextRenderer();
+        this.update();
+    }
+
     /**
      * Disposes this `MapView`.
      *
@@ -911,6 +1086,11 @@ export class MapView extends THREE.EventDispatcher {
      * cleanup, you must ensure that all references to this `MapView` are removed.
      */
     dispose() {
+        if (this.m_movementFinishedUpdateTimerId) {
+            clearTimeout(this.m_movementFinishedUpdateTimerId);
+            this.m_movementFinishedUpdateTimerId = undefined;
+        }
+
         if (this.m_animationFrameHandle !== undefined) {
             cancelAnimationFrame(this.m_animationFrameHandle);
             this.m_animationFrameHandle = undefined;
@@ -923,6 +1103,7 @@ export class MapView extends THREE.EventDispatcher {
             dataSource.dispose();
         }
         this.m_visibleTiles.clearTileCache();
+        this.m_textElementsRenderer.clearRenderStates();
         this.m_renderer.dispose();
         this.m_imageCache.clear();
 
@@ -960,7 +1141,9 @@ export class MapView extends THREE.EventDispatcher {
         this.m_visibleTiles.setNumberOfVisibleTiles(Math.floor(numVisibleTiles));
         this.updateImages();
         this.updateLighting();
-        this.updateTextRenderer();
+
+        this.m_textElementsRenderer.invalidateCache();
+
         this.updateSkyBackground();
         this.update();
     }
@@ -1047,6 +1230,21 @@ export class MapView extends THREE.EventDispatcher {
      * Changes the `Theme` used by this `MapView` to style map elements.
      */
     set theme(theme: Theme) {
+        if (!ThemeLoader.isThemeLoaded(theme)) {
+            this.m_themeIsLoading = true;
+            // If theme is not yet loaded, let's set theme asynchronously
+            ThemeLoader.load(theme, { uriResolver: this.m_uriResolver })
+                .then(loadedTheme => {
+                    this.m_themeIsLoading = false;
+                    this.theme = loadedTheme;
+                })
+                .catch(error => {
+                    this.m_themeIsLoading = false;
+                    logger.error(`failed to set theme: ${error}`, error);
+                });
+            return;
+        }
+
         // Fog and sky.
         this.m_theme.fog = theme.fog;
         this.m_theme.sky = theme.sky;
@@ -1073,28 +1271,32 @@ export class MapView extends THREE.EventDispatcher {
         this.m_theme.textStyles = theme.textStyles;
         this.m_theme.defaultTextStyle = theme.defaultTextStyle;
         this.m_theme.fontCatalogs = theme.fontCatalogs;
-        this.m_textRenderStyleCache.clear();
-        this.m_textLayoutStyleCache.clear();
 
-        this.updateTextRenderer();
+        this.resetTextRenderer();
 
         if (this.m_theme.styles === undefined) {
             this.m_theme.styles = {};
         }
-
-        if (theme.styles !== undefined) {
-            for (const styleSetName in theme.styles) {
-                if (theme.styles[styleSetName] !== undefined) {
-                    const styleSet = theme.styles[styleSetName];
-                    this.getDataSourcesByStyleSetName(styleSetName).forEach(ds =>
-                        ds.setStyleSet(styleSet)
-                    );
-                    this.m_theme.styles[styleSetName] = styleSet;
-                }
-            }
+        if (this.m_backgroundDataSource) {
+            this.m_backgroundDataSource.setTheme(this.m_theme);
         }
+        this.m_theme.styles = theme.styles || {};
+        this.m_theme.definitions = theme.definitions;
+
+        for (const dataSource of this.m_tileDataSources) {
+            dataSource.setTheme(this.m_theme);
+        }
+        THEME_LOADED_EVENT.time = Date.now();
         this.dispatchEvent(THEME_LOADED_EVENT);
         this.update();
+    }
+
+    /**
+     * [[UriResolver]] used to resolve application/deployment specific `URI`s into actual `URLs`
+     * that can be loaded with `fetch`.
+     */
+    get uriResolver(): UriResolver | undefined {
+        return this.m_uriResolver;
     }
 
     /**
@@ -1140,7 +1342,6 @@ export class MapView extends THREE.EventDispatcher {
         this.m_tileDataSources.forEach((dataSource: DataSource) => {
             dataSource.setLanguages(this.m_languages);
         });
-        this.clearTileCache();
         this.update();
     }
 
@@ -1150,11 +1351,15 @@ export class MapView extends THREE.EventDispatcher {
 
     /**
      * @hidden
-     * Return if all fading animations (for debugging and performance measurement) should be
-     * disabled.
+     * Disable all fading animations (for debugging and performance measurement). Defaults to
+     * `false`.
      */
-    get fadingDisabled(): boolean {
-        return this.m_options.disableFading === true;
+    set disableFading(disable: boolean) {
+        this.m_textElementsRenderer.disableFading = disable;
+    }
+
+    get disableFading(): boolean {
+        return this.m_textElementsRenderer.disableFading;
     }
 
     /**
@@ -1163,6 +1368,15 @@ export class MapView extends THREE.EventDispatcher {
      */
     get frameNumber(): number {
         return this.m_frameNumber;
+    }
+
+    /**
+     * @hidden
+     * Reset the frame number to 0.
+     */
+    resetFrameNumber() {
+        this.m_frameNumber = 0;
+        this.m_previousFrameTimeStamp = undefined;
     }
 
     /**
@@ -1268,21 +1482,45 @@ export class MapView extends THREE.EventDispatcher {
     /**
      * Changes the projection at run time.
      *
-     * TODO: There seems to be some issue with the sphere projection, when changing from this
-     * projection to a planar projection, the map is rotated. This needs to be fixed.
+     * @param projection The [[Projection]] instance to use.
      */
     set projection(projection: Projection) {
         // The geo center must be reset when changing the projection, because the
         // camera's position is based on the projected geo center.
-        const geoCenter = this.geoCenter;
+        let target = MapViewUtils.getWorldTargetFromCamera(this.camera, this.projection);
+        if (target === null) {
+            logger.warn(
+                "MapView does not support a view pointing in the void, using last focus point."
+            );
+            target = this.worldTarget;
+        }
+        const targetCoordinates = this.projection.unprojectPoint(target);
+        const targetDistance = this.camera.position.distanceTo(target);
+        const attitude = MapViewUtils.extractAttitude(this, this.camera);
+        const pitchDeg = THREE.Math.radToDeg(attitude.pitch);
+        const headingDeg = -THREE.Math.radToDeg(attitude.yaw);
+
         this.m_visibleTileSetOptions.projection = projection;
+        this.updatePolarDataSource();
         this.clearTileCache();
-        // We reset the theme, this has the affect of ensuring all caches are cleared.
-        this.theme = this.theme;
-        this.geoCenter = geoCenter;
-        // Necessary for the sphereProjection, however this also resets the camera position, so it
-        // should be fixed.
-        //this.setupCamera();
+        this.textElementsRenderer.clearRenderStates();
+        this.m_visibleTiles = this.createVisibleTileSet();
+
+        this.lookAt(targetCoordinates, targetDistance, pitchDeg, headingDeg);
+    }
+
+    /**
+     * Get camera clipping planes evaluator used.
+     */
+    get clipPlanesEvaluator(): ClipPlanesEvaluator {
+        return this.m_visibleTileSetOptions.clipPlanesEvaluator;
+    }
+
+    /**
+     * Changes the clip planes evaluator at run time.
+     */
+    set clipPlanesEvaluator(clipPlanesEvaluator: ClipPlanesEvaluator) {
+        this.m_visibleTileSetOptions.clipPlanesEvaluator = clipPlanesEvaluator;
     }
 
     /**
@@ -1290,6 +1528,57 @@ export class MapView extends THREE.EventDispatcher {
      */
     get focalLength(): number {
         return this.m_focalLength;
+    }
+
+    /** @internal
+     * Get geo coordinates of camera focus (target) point.
+     *
+     * @see worldTarget
+     *
+     * @returns geo coordinates of the camera focus point.
+     */
+    get target(): GeoCoordinates {
+        return this.m_targetGeoPos;
+    }
+
+    /** @internal
+     * Get world coordinates of camera focus point.
+     *
+     * @note The focus point coordinates are updated with each camera update so you don't need
+     * to re-calculate it, although if the camera started looking to the void, the last focus
+     * point is stored.
+     *
+     * @returns world coordinates of the camera focus point.
+     */
+    get worldTarget(): THREE.Vector3 {
+        return this.m_targetWorldPos;
+    }
+
+    /** @internal
+     * Get distance from camera to the point of focus in world units.
+     *
+     * @note If camera does not point to any ground anymore the last focus point distance is
+     * then returned.
+     *
+     * @returns Last known focus point distance.
+     */
+    get targetDistance(): number {
+        return this.m_targetDistance;
+    }
+
+    /**
+     * Get object describing frustum planes distances and min/max visibility range for actual
+     * camera setup.
+     * Near and far plane distance are self explanatory while minimum and maximum visibility range
+     * describes the extreme near/far planes distances that may be achieved with current camera
+     * settings, meaning at current zoom level (ground distance) and any possible orientation.
+     * @note Visibility is directly related to camera [[ClipPlaneEvaluator]] used and determines
+     * the maximum possible distance of camera far clipping plane regardless of tilt, but may change
+     * whenever zoom level changes. Distance is measured in world units which may be approximately
+     * equal to meters, but this depends on the distortion related to projection type used.
+     */
+    get viewRanges(): ViewRanges {
+        return this.m_viewRanges;
     }
 
     /**
@@ -1416,6 +1705,11 @@ export class MapView extends THREE.EventDispatcher {
     get zoomLevel(): number {
         return this.m_zoomLevel;
     }
+    set zoomLevel(zoomLevel: number) {
+        this.m_zoomLevel = THREE.Math.clamp(zoomLevel, this.m_minZoomLevel, this.m_maxZoomLevel);
+        MapViewUtils.zoomOnTargetPosition(this, 0, 0, this.m_zoomLevel);
+        this.update();
+    }
 
     /**
      * Returns the storage level for the given camera setup.
@@ -1438,9 +1732,22 @@ export class MapView extends THREE.EventDispatcher {
 
     /**
      * Returns `true` if the native WebGL antialiasing is enabled.
+     *
+     * @default `true` for `pixelRatio` < `2.0`, `false` otherwise.
      */
     get nativeWebglAntialiasEnabled(): boolean {
-        return this.m_options.enableNativeWebglAntialias !== false;
+        return this.m_options.enableNativeWebglAntialias === undefined
+            ? this.pixelRatio < 2.0
+            : this.m_options.enableNativeWebglAntialias;
+    }
+
+    /**
+     * Returns 'true' if the phased loading is currently enabled.
+     *
+     * @default true.
+     */
+    get phasedLoadingEnabled(): boolean {
+        return this.m_options.enablePhasedLoading !== false;
     }
 
     /**
@@ -1458,7 +1765,7 @@ export class MapView extends THREE.EventDispatcher {
      */
     setFovCalculation(fovCalculation: FovCalculation) {
         this.m_options.fovCalculation = fovCalculation;
-        this.calculateFocalLength(this.m_renderer.getSize(tmpVector).height);
+        this.calculateFocalLength(this.m_renderer.getSize(cache.vector2[0]).height);
         this.updateCameras();
     }
 
@@ -1502,7 +1809,12 @@ export class MapView extends THREE.EventDispatcher {
         }
 
         dataSource.attach(this);
+        dataSource.setEnableElevationOverlay(this.m_elevationProvider !== undefined);
         this.m_tileDataSources.push(dataSource);
+
+        if (this.m_backgroundDataSource) {
+            this.m_backgroundDataSource.updateStorageLevelOffset();
+        }
 
         return dataSource
             .connect()
@@ -1530,10 +1842,7 @@ export class MapView extends THREE.EventDispatcher {
                     this.update();
                 });
 
-                if (this.m_theme.styles !== undefined && dataSource.styleSetName !== undefined) {
-                    const styleSet = this.m_theme.styles[dataSource.styleSetName];
-                    dataSource.setStyleSet(styleSet, this.m_languages);
-                }
+                dataSource.setTheme(this.m_theme);
 
                 this.m_connectedDataSources.add(dataSource.name);
 
@@ -1545,6 +1854,10 @@ export class MapView extends THREE.EventDispatcher {
                 this.update();
             })
             .catch(error => {
+                logger.error(
+                    `Failed to connect to datasource ${dataSource.name}: ${error.message}`
+                );
+
                 this.m_failedDataSources.add(dataSource.name);
                 this.dispatchEvent({
                     type: MapViewEventNames.DataSourceConnect,
@@ -1566,10 +1879,14 @@ export class MapView extends THREE.EventDispatcher {
         }
         dataSource.detach(this);
 
-        this.m_visibleTiles.removeDataSource(dataSource.name);
+        this.m_visibleTiles.removeDataSource(dataSource);
         this.m_tileDataSources.splice(dsIndex, 1);
         this.m_connectedDataSources.delete(dataSource.name);
         this.m_failedDataSources.delete(dataSource.name);
+
+        if (this.m_backgroundDataSource) {
+            this.m_backgroundDataSource.updateStorageLevelOffset();
+        }
 
         this.update();
     }
@@ -1587,10 +1904,7 @@ export class MapView extends THREE.EventDispatcher {
      * @param textElements Array of [[TextElement]] to be added.
      */
     addOverlayText(textElements: TextElement[]): void {
-        if (this.m_overlayTextElements !== undefined) {
-            this.m_overlayTextElements = this.m_overlayTextElements.concat(textElements);
-        }
-        this.updateTextRenderer();
+        this.m_textElementsRenderer.addOverlayText(textElements);
         this.update();
     }
 
@@ -1600,43 +1914,61 @@ export class MapView extends THREE.EventDispatcher {
      * @param textElements Array of [[TextElement]] to be added.
      */
     clearOverlayText(): void {
-        this.m_overlayTextElements = [];
+        this.m_textElementsRenderer.clearOverlayText();
     }
 
     /**
      * The method that sets the camera to the desired angle (`tiltDeg`) and `distance` (in meters)
-     * to the `target` location, from a certain azimuth (`azimuthAngle`).
+     * to the `target` location, from a certain heading (`headingAngle`).
      *
      * @param target The location to look at.
      * @param distance The distance of the camera to the target in meters.
-     * @param tiltDeg The camera tilt angle in degrees (0 is vertical).
-     * @param azimuthDeg The camera azimuth angle in degrees and clockwise, starting north.
+     * @param tiltDeg The camera tilt angle in degrees (0 is vertical), curbed below 89deg.
+     * @param headingDeg The camera heading angle in degrees and clockwise (as opposed to yaw),
+     * starting north.
      */
     lookAt(
         target: GeoCoordinates,
         distance: number,
         tiltDeg: number = 0,
-        azimuthDeg: number = 0
+        headingDeg: number = 0
     ): void {
-        MapViewUtils.setRotation(this, -azimuthDeg, tiltDeg);
-        this.geoCenter = MapViewUtils.getCameraCoordinatesFromTargetCoordinates(
+        const limitedTilt = Math.min(MapViewUtils.MAX_TILT_DEG, tiltDeg);
+        // MapViewUtils#setRotation uses pitch, not tilt, which is different in sphere projection.
+        // But in sphere, in the tangent space of the target of the camera, pitch = tilt. So, put
+        // the camera on the target, so the tilt can be passed to getRotation as a pitch.
+        MapViewUtils.getCameraRotationAtTarget(
+            this.projection,
+            target,
+            -headingDeg,
+            limitedTilt,
+            this.camera.quaternion
+        );
+        MapViewUtils.getCameraPositionFromTargetCoordinates(
             target,
             distance,
-            -azimuthDeg,
-            tiltDeg,
-            this
+            -headingDeg,
+            limitedTilt,
+            this.projection,
+            this.camera.position
         );
-        const pitchRad = THREE.Math.degToRad(tiltDeg);
-        this.camera.position.setZ(Math.cos(pitchRad) * distance);
+        this.camera.updateMatrixWorld(true);
+        // TODO: Consider forcing entire cameras update, see: [[updateCameras]]
+        this.m_targetGeoPos.copy(target);
+        this.m_targetWorldPos.copy(this.projection.projectPoint(target));
+        this.m_targetDistance = distance;
     }
 
     /**
      * Moves the camera to the specified [[GeoCoordinates]], sets the desired `zoomLevel` and
-     * adjusts the yaw and pitch.
+     * adjusts the yaw and pitch. The pitch of the camera is always curbed so that the camera cannot
+     * look above the horizon. This paradigm is necessary in [[MapControls]], where the center of \
+     * the screen is used for the orbiting interaction (3 fingers / right mouse button).
      *
      * @param geoPos Geolocation to move the camera to.
      * @param zoomLevel Desired zoom level.
-     * @param yawDeg Camera yaw in degrees.
+     * @param yawDeg Camera yaw in degrees, counter-clockwise (as opposed to heading), starting
+     * north.
      * @param pitchDeg Camera pitch in degrees.
      */
     setCameraGeolocationAndZoom(
@@ -1645,27 +1977,19 @@ export class MapView extends THREE.EventDispatcher {
         yawDeg: number = 0,
         pitchDeg: number = 0
     ): void {
-        if (this.projection.type === ProjectionType.Planar) {
-            MapViewUtils.setRotation(this, yawDeg, pitchDeg);
-            this.geoCenter = geoPos;
-            MapViewUtils.zoomOnTargetPosition(this, 0, 0, zoomLevel);
-        } else {
-            this.geoCenter = new GeoCoordinates(geoPos.latitude, geoPos.longitude);
-
-            const distanceToGround = MapViewUtils.calculateDistanceToGroundFromZoomLevel(
-                this,
-                THREE.Math.clamp(zoomLevel, this.minZoomLevel, this.maxZoomLevel)
+        this.geoCenter = geoPos;
+        let limitedPitch = Math.min(89, pitchDeg); // 90 leads to imprecision issues.
+        if (this.projection.type === ProjectionType.Spherical) {
+            const maxPitchRadWithCurvature = Math.asin(
+                EarthConstants.EQUATORIAL_RADIUS /
+                    (MapViewUtils.calculateDistanceToGroundFromZoomLevel(this, zoomLevel) +
+                        EarthConstants.EQUATORIAL_RADIUS)
             );
-
-            const surfaceNormal = new THREE.Vector3();
-
-            this.projection.surfaceNormal(this.m_camera.position, surfaceNormal);
-
-            this.m_camera.position.addScaledVector(surfaceNormal, distanceToGround);
-
-            this.m_camera.lookAt(this.scene.position);
+            const maxPitchDegWithCurvature = THREE.Math.radToDeg(maxPitchRadWithCurvature);
+            limitedPitch = Math.min(limitedPitch, maxPitchDegWithCurvature);
         }
-
+        MapViewUtils.zoomOnTargetPosition(this, 0, 0, zoomLevel);
+        MapViewUtils.setRotation(this, yawDeg, limitedPitch);
         this.update();
     }
 
@@ -1715,7 +2039,12 @@ export class MapView extends THREE.EventDispatcher {
      * Returns `true` if the current frame will immediately be followed by another frame.
      */
     get isDynamicFrame(): boolean {
-        return this.cameraIsMoving || this.animating || this.m_updatePending;
+        return (
+            this.cameraIsMoving ||
+            this.animating ||
+            this.m_updatePending ||
+            this.m_animatedExtrusionHandler.isAnimating
+        );
     }
 
     /**
@@ -1732,8 +2061,8 @@ export class MapView extends THREE.EventDispatcher {
             // formulas are all equivalent:
             // lookAtDistance = (EQUATORIAL_CIRCUMFERENCE * focalLength) / (256 * zoomLevel^2);
             // lookAtDistance = abs(cameraPos.z) / cos(cameraPitch);
-            // Here we may use precalculated distance (once pre frame):
-            const lookAtDistance = this.m_lookAtDistance;
+            // Here we may use precalculated target distance (once pre frame):
+            const lookAtDistance = this.m_targetDistance;
 
             // Find world space object size that corresponds to one pixel on screen.
             this.m_pixelToWorld = MapViewUtils.calculateWorldSizeByFocalLength(
@@ -1817,9 +2146,8 @@ export class MapView extends THREE.EventDispatcher {
      * `undefined`.
      */
     getScreenPosition(geoPos: GeoCoordinates): THREE.Vector2 | undefined {
-        const worldPos = new THREE.Vector3();
-        this.projection.projectPoint(geoPos, worldPos);
-        const p = this.m_screenProjector.project(worldPos);
+        this.projection.projectPoint(geoPos, cache.vector3[0]);
+        const p = this.m_screenProjector.project(cache.vector3[0]);
         if (p !== undefined) {
             const { width, height } = this.getCanvasClientSize();
             p.x = p.x + width / 2;
@@ -1854,10 +2182,9 @@ export class MapView extends THREE.EventDispatcher {
      */
     getWorldPositionAt(x: number, y: number): THREE.Vector3 | null {
         this.m_raycaster.setFromCamera(this.getNormalizedScreenCoordinates(x, y), this.m_camera);
-        const worldPosition = new THREE.Vector3();
         return this.projection.type === ProjectionType.Spherical
-            ? this.m_raycaster.ray.intersectSphere(this.m_sphere, worldPosition)
-            : this.m_raycaster.ray.intersectPlane(this.m_plane, worldPosition);
+            ? this.m_raycaster.ray.intersectSphere(this.m_sphere, cache.vector3[0])
+            : this.m_raycaster.ray.intersectPlane(this.m_plane, cache.vector3[0]);
     }
 
     /**
@@ -1942,9 +2269,21 @@ export class MapView extends THREE.EventDispatcher {
     }
 
     /**
+     * Redraws scene immediately
+     *
+     * @note Before using this method, set `synchronousRendering` to `true`
+     * in the [[MapViewOptions]]
+     */
+    renderSync() {
+        this.renderFunc(PerformanceTimer.now());
+    }
+
+    /**
      * Requests a redraw of the scene.
      */
     update() {
+        this.dispatchEvent(UPDATE);
+
         if (this.m_updatePending) {
             return;
         } // compress the update request
@@ -1983,15 +2322,19 @@ export class MapView extends THREE.EventDispatcher {
      * @param dataSourceName The name of the [[DataSource]].
      */
     clearTileCache(dataSourceName?: string) {
-        this.m_visibleTiles.clearTileCache(dataSourceName);
-
         if (dataSourceName !== undefined) {
             const dataSource = this.getDataSourceByName(dataSourceName);
             if (dataSource) {
+                this.m_visibleTiles.clearTileCache(dataSource);
                 dataSource.clearCache();
             }
         } else {
+            this.m_visibleTiles.clearTileCache();
             this.m_tileDataSources.forEach(dataSource => dataSource.clearCache());
+        }
+
+        if (this.m_elevationProvider !== undefined) {
+            this.m_elevationProvider.clearCache();
         }
     }
 
@@ -2050,6 +2393,28 @@ export class MapView extends THREE.EventDispatcher {
         this.m_elevationRangeSource = elevationRangeSource;
         this.m_elevationRangeSource.connect();
         this.m_elevationProvider = elevationProvider;
+        this.dataSources.forEach(dataSource => {
+            dataSource.setEnableElevationOverlay(true);
+        });
+        this.m_tileGeometryManager.setTileUpdateCallback((tile: Tile) => {
+            overlayOnElevation(tile);
+        });
+        this.clearTileCache();
+    }
+
+    /**
+     * Clears any elevation sources and provider previously set.
+     * @param elevationSource The datasource to be cleared.
+     */
+    clearElevationSource(elevationSource: DataSource) {
+        this.removeDataSource(elevationSource);
+        this.m_elevationRangeSource = undefined;
+        this.m_elevationProvider = undefined;
+        this.dataSources.forEach(dataSource => {
+            dataSource.setEnableElevationOverlay(false);
+        });
+        this.m_tileGeometryManager.setTileUpdateCallback(undefined);
+        this.clearTileCache();
     }
 
     /**
@@ -2091,64 +2456,58 @@ export class MapView extends THREE.EventDispatcher {
     }
 
     /**
+     * Plug-in PolarTileDataSource for spherical projection and plug-out otherwise
+     */
+    private updatePolarDataSource() {
+        const dataSource = this.m_polarDataSource;
+        if (this.m_enablePolarDataSource === true && dataSource !== undefined) {
+            const twinDataSource = this.getDataSourceByName(dataSource.name);
+
+            if (this.projection.type === ProjectionType.Spherical) {
+                if (twinDataSource === undefined) {
+                    this.addDataSource(dataSource);
+                }
+            } else {
+                if (twinDataSource !== undefined) {
+                    this.removeDataSource(dataSource);
+                }
+            }
+        }
+    }
+
+    /**
      * Updates the camera and the projections and resets the screen collisions,
      * note, setupCamera must be called before this is called.
+     * @param viewRanges optional parameter that supplies new view ranges, most importantly
+     * near/far clipping planes distance. If parameter is not provided view ranges will be
+     * calculated from [[ClipPlaneEvaluator]] used in [[VisibleTileSet]].
      */
-    private updateCameras() {
-        const { width, height } = this.m_renderer.getSize(tmpVector);
+    private updateCameras(viewRanges?: ViewRanges) {
+        const { width, height } = this.m_renderer.getSize(cache.vector2[0]);
         this.m_camera.aspect =
             this.m_forceCameraAspect !== undefined ? this.m_forceCameraAspect : width / height;
         this.setFovOnCamera(this.m_options.fovCalculation!, height);
 
-        let nearPlane: number = 0;
-        let farPlane: number = 0;
+        // When calculating clip planes account for the highest building on the earth,
+        // multiplying its height by projection scaling factor. This approach assumes
+        // constantHeight property of extruded polygon technique is set as default false,
+        // otherwise the near plane margins will be bigger then required, but still correct.
+        const projectionScale = this.projection.getScaleFactor(this.camera.position);
+        const maxGeometryHeightScaled =
+            projectionScale *
+            this.m_tileDataSources.reduce((r, ds) => Math.max(r, ds.maxGeometryHeight), 0);
 
-        if (this.projection.type === ProjectionType.Spherical) {
-            // near and far plane for a set up where
-            // the camera is looking at the center of the scene.
-            const r = EarthConstants.EQUATORIAL_RADIUS;
-            const d = this.m_camera.position.length();
-            const alpha = Math.asin(r / d);
-            const xaxis = new THREE.Vector3();
-            const yaxis = new THREE.Vector3();
-            const zaxis = new THREE.Vector3();
-            this.m_camera.matrixWorld.extractBasis(xaxis, yaxis, zaxis);
-            const q = new THREE.Quaternion();
-            q.setFromAxisAngle(xaxis, alpha);
-            const fwd = zaxis.clone().negate();
-            const p = this.m_camera.position.clone();
-            p.addScaledVector(fwd.clone().applyQuaternion(q), Math.sqrt(d * d - r * r));
-            farPlane = p
-                .clone()
-                .sub(this.m_camera.position)
-                .dot(fwd);
-            const bias = 2000; // TODO: generalize.
-            nearPlane = Math.max(1, this.projection.groundDistance(this.m_camera.position) - bias);
-        } else {
-            const kMinNear = 0.1;
-            const kMultiplier = 50.0;
-            const kFarOffset = 200.0;
-
-            const groundDistance = this.projection.groundDistance(this.m_camera.position);
-            nearPlane = Math.max(kMinNear, groundDistance * 0.1);
-            farPlane = nearPlane * kMultiplier + kFarOffset;
-
-            if (this.m_options.farPlaneEvaluator !== undefined) {
-                this.m_camera.getWorldDirection(this.m_tempVector3);
-                const angle = THREE.Math.radToDeg(this.m_tempVector3.angleTo(EYE_INVERSE));
-                const nearFarPlane = this.m_options.farPlaneEvaluator(
-                    this,
-                    angle,
-                    nearPlane,
-                    farPlane
-                );
-                nearPlane = Math.max(kMinNear, nearFarPlane.near);
-                farPlane = Math.max(nearPlane + kFarOffset, nearFarPlane.far);
-            }
-        }
-
-        this.m_camera.near = nearPlane;
-        this.m_camera.far = farPlane;
+        // Copy all properties from new view ranges to our readonly object.
+        // This allows to keep all view ranges references valid and keeps up-to-date
+        // information within them. Works the same as copping all properties one-by-one.
+        Object.assign(
+            this.m_viewRanges,
+            viewRanges === undefined
+                ? this.m_visibleTiles.updateClipPlanes(maxGeometryHeightScaled)
+                : viewRanges
+        );
+        this.m_camera.near = this.m_viewRanges.near;
+        this.m_camera.far = this.m_viewRanges.far;
 
         this.m_camera.updateProjectionMatrix();
         this.m_camera.updateMatrixWorld(false);
@@ -2171,22 +2530,39 @@ export class MapView extends THREE.EventDispatcher {
 
         this.m_pixelToWorld = undefined;
 
-        if (this.projection.type === ProjectionType.Spherical) {
-            this.m_lookAtDistance = this.projection.groundDistance(this.m_camera.position);
+        const cameraPitch = MapViewUtils.extractAttitude(this, this.m_camera).pitch;
+        const cameraPosZ = this.getCameraHeightAboveTerrain(TERRAIN_ZOOM_LEVEL);
+        const zoomLevelDistance = cameraPosZ / Math.cos(Math.min(cameraPitch, Math.PI / 3));
+        this.m_zoomLevel = MapViewUtils.calculateZoomLevelFromDistance(this, zoomLevelDistance);
+        this.m_fog.update(this, this.m_viewRanges.maximum);
 
-            this.m_zoomLevel = MapViewUtils.calculateZoomLevelFromDistance(
-                this.projection.groundDistance(this.m_camera.position),
-                this
-            );
-        } else {
-            const cameraPitch = MapViewUtils.extractYawPitchRoll(this.m_camera.quaternion).pitch;
-            const cameraPosZ = Math.abs(this.projection.groundDistance(this.m_camera.position));
-
-            this.m_lookAtDistance = cameraPosZ / Math.cos(cameraPitch);
-
-            const zoomLevelDistance = cameraPosZ / Math.cos(Math.min(cameraPitch, Math.PI / 3));
-            this.m_zoomLevel = MapViewUtils.calculateZoomLevelFromDistance(zoomLevelDistance, this);
+        const target = MapViewUtils.getWorldTargetFromCamera(this.m_camera, this.projection);
+        if (target !== null) {
+            this.m_targetWorldPos.copy(target);
+            this.m_targetGeoPos = this.projection.unprojectPoint(target);
+            this.m_targetDistance = this.camera.position.distanceTo(target);
         }
+    }
+
+    /**
+     * Returns the height of the camera above the earths surface.
+     *
+     * If there is an ElevationProvider, this is used. Otherwise the projection is used to determine
+     * how high the camera is above the surface.
+     *
+     * @param level Which level to request the surface height from.
+     * @return Height in world units.
+     */
+    private getCameraHeightAboveTerrain(level?: number): number {
+        if (this.elevationProvider !== undefined) {
+            const heightAboveTerrain = this.elevationProvider.getHeight(this.geoCenter, level);
+            if (heightAboveTerrain !== undefined) {
+                const height =
+                    this.projection.unprojectAltitude(this.m_camera.position) - heightAboveTerrain;
+                return Math.max(height, 1);
+            }
+        }
+        return Math.abs(this.projection.groundDistance(this.m_camera.position));
     }
 
     private detectCurrentFps(now: number) {
@@ -2212,7 +2588,7 @@ export class MapView extends THREE.EventDispatcher {
      * Draw a new frame.
      */
     private drawFrame() {
-        if (this.m_drawing) {
+        if (this.m_drawing || this.m_options.synchronousRendering) {
             return;
         }
         // Cancel an active requestAnimationFrame() cycle. Failure to do this may end up in
@@ -2340,7 +2716,6 @@ export class MapView extends THREE.EventDispatcher {
         }
 
         this.updateCameras();
-        this.m_fog.update(this.m_camera);
         this.m_renderer.clear();
 
         // clear the scene
@@ -2352,18 +2727,19 @@ export class MapView extends THREE.EventDispatcher {
             setupTime = PerformanceTimer.now();
         }
 
-        if (this.m_backgroundDataSource) {
-            this.m_backgroundDataSource.updateTilingScheme();
-        }
-
         // TBD: Update renderList only any of its params (camera, etc...) has changed.
         if (!this.lockVisibleTileSet) {
-            this.m_visibleTiles.updateRenderList(
+            const viewRangesStatus = this.m_visibleTiles.updateRenderList(
                 this.storageLevel,
                 Math.floor(this.zoomLevel),
                 this.getEnabledTileDataSources(),
                 this.m_elevationRangeSource
             );
+            // View ranges has changed due to features (with elevation) that affects clip planes
+            // positioning, update cameras with new clip planes positions.
+            if (viewRangesStatus.viewRangesChanged) {
+                this.updateCameras(viewRangesStatus.viewRanges);
+            }
         }
 
         if (gatherStatistics) {
@@ -2372,9 +2748,11 @@ export class MapView extends THREE.EventDispatcher {
 
         const renderList = this.m_visibleTiles.dataSourceTileList;
 
+        // no need to check everything if we're not going to create text renderer.
         renderList.forEach(({ zoomLevel, renderedTiles }) => {
             renderedTiles.forEach(tile => {
                 this.renderTileObjects(tile, zoomLevel);
+
                 //We know that rendered tiles are visible (in the view frustum), so we update the
                 //frame number, note we don't do this for the visibleTiles because some may still be
                 //loading (and therefore aren't visible in the sense of being seen on the screen).
@@ -2383,6 +2761,23 @@ export class MapView extends THREE.EventDispatcher {
                 tile.frameNumLastVisible = this.m_frameNumber;
             });
         });
+
+        // Check if this is the time to place the labels for the first time. Pretty much everything
+        // should have been loaded, and no animation should be running.
+        if (
+            !this.m_initialTextPlacementDone &&
+            !this.m_firstFrameComplete &&
+            !this.isDynamicFrame &&
+            !this.m_themeIsLoading &&
+            this.m_poiTableManager.finishedLoading &&
+            this.m_visibleTiles.allVisibleTilesLoaded &&
+            this.m_connectedDataSources.size + this.m_failedDataSources.size ===
+                this.m_tileDataSources.length &&
+            !this.m_textElementsRenderer.initializing &&
+            !this.m_textElementsRenderer.loading
+        ) {
+            this.m_initialTextPlacementDone = true;
+        }
 
         this.m_mapAnchors.children.forEach((childObject: MapAnchor) => {
             if (childObject.geoPosition === undefined) {
@@ -2402,13 +2797,26 @@ export class MapView extends THREE.EventDispatcher {
 
             // Increment the counters for all data sources.
             renderList.forEach(({ zoomLevel, renderedTiles, visibleTiles, numTilesLoading }) => {
-                currentFrameEvent!.addValue("renderCount.numTilesRendered", renderedTiles.length);
+                currentFrameEvent!.addValue("renderCount.numTilesRendered", renderedTiles.size);
                 currentFrameEvent!.addValue("renderCount.numTilesVisible", visibleTiles.length);
                 currentFrameEvent!.addValue("renderCount.numTilesLoading", numTilesLoading);
             });
         }
 
-        this.m_movementDetector.checkCameraMoved(this, time);
+        if (this.m_movementDetector.checkCameraMoved(this, time)) {
+            const { yaw, pitch, roll } = MapViewUtils.extractAttitude(this, this.camera);
+            const { latitude, longitude, altitude } = this.geoCenter;
+            this.dispatchEvent({
+                type: MapViewEventNames.CameraPositionChanged,
+                latitude,
+                longitude,
+                altitude,
+                yaw,
+                pitch,
+                roll,
+                zoom: this.zoomLevel
+            });
+        }
 
         // The camera used to render the scene.
         const camera = this.m_pointOfView !== undefined ? this.m_pointOfView : this.m_rteCamera;
@@ -2454,26 +2862,6 @@ export class MapView extends THREE.EventDispatcher {
             this.dispatchEvent(FIRST_FRAME_EVENT);
         }
 
-        if (
-            !this.m_firstFrameComplete &&
-            this.m_visibleTiles.allVisibleTilesLoaded &&
-            this.m_connectedDataSources.size + this.m_failedDataSources.size ===
-                this.m_tileDataSources.length &&
-            !this.m_updatePending &&
-            !this.animating &&
-            this.m_textElementsRenderer !== undefined &&
-            !this.m_textElementsRenderer.loading
-        ) {
-            this.m_firstFrameComplete = true;
-
-            if (gatherStatistics) {
-                stats.appResults.set("firstFrameComplete", time);
-            }
-
-            FRAME_COMPLETE_EVENT.time = time;
-            this.dispatchEvent(FRAME_COMPLETE_EVENT);
-        }
-
         this.m_visibleTiles.disposePendingTiles();
 
         this.m_drawing = false;
@@ -2500,10 +2888,30 @@ export class MapView extends THREE.EventDispatcher {
 
         DID_RENDER_EVENT.time = time;
         this.dispatchEvent(DID_RENDER_EVENT);
+
+        // After completely rendering this frame, it is checked if this frame was the first complete
+        // frame, with no more tiles, geometry and labels waiting to be added, and no animation
+        // running. The initial placement of text in this render call may have changed the loading
+        // state of the TextElementsRenderer, so this has to be checked again.
+        if (
+            !this.m_firstFrameComplete &&
+            this.m_initialTextPlacementDone &&
+            !this.isDynamicFrame &&
+            !this.textElementsRenderer.loading
+        ) {
+            this.m_firstFrameComplete = true;
+
+            if (gatherStatistics) {
+                stats.appResults.set("firstFrameComplete", time);
+            }
+
+            FRAME_COMPLETE_EVENT.time = time;
+            this.dispatchEvent(FRAME_COMPLETE_EVENT);
+        }
     }
 
     private renderTileObjects(tile: Tile, zoomLevel: number) {
-        const worldOffsetX = this.projection.worldExtent(0, 0).max.x * tile.offset;
+        const worldOffsetX = tile.computeWorldOffsetX();
         if (tile.willRender(zoomLevel)) {
             for (const object of tile.objects) {
                 object.position.copy(tile.center);
@@ -2512,6 +2920,36 @@ export class MapView extends THREE.EventDispatcher {
                 }
                 object.position.x += worldOffsetX;
                 object.position.sub(this.m_camera.position);
+                if (tile.localTangentSpace) {
+                    object.setRotationFromMatrix(tile.boundingBox.getRotationMatrix());
+                }
+                object.frustumCulled = false;
+                if (object._backupRenderOrder === undefined) {
+                    object._backupRenderOrder = object.renderOrder;
+                }
+
+                const isBuilding =
+                    object.userData !== undefined &&
+                    object.userData.kind !== undefined &&
+                    (object.userData.kind as GeometryKind[]).includes(GeometryKind.Building);
+
+                // When falling back to a parent tile (i.e. tile.levelOffset < 0) there will
+                // be overlaps with the already loaded tiles. Therefore all (flat) objects
+                // in a fallback tile must be shifted, such that their renderOrder is less
+                // than the groundPlane that each neighbouring Tile has (it has a renderOrder
+                // of -10000, see addGroundPlane in TileGeometryCreator), only then can we be
+                // sure that nothing of the parent will be rendered on top of the children,
+                // as such, we shift using the FALLBACK_RENDER_ORDER_OFFSET.
+                // This does not apply to buildings b/c they are 3d and the overlaps
+                // are resolved with a depth prepass. Note we set this always to ensure that if
+                // the Tile is used as a fallback, and then used normally, that we have the correct
+                // renderOrder.
+                object.renderOrder =
+                    object._backupRenderOrder +
+                    (!isBuilding && tile.levelOffset < 0
+                        ? FALLBACK_RENDER_ORDER_OFFSET * tile.levelOffset
+                        : 0);
+
                 this.m_mapTilesRoot.add(object);
             }
         }
@@ -2524,59 +2962,51 @@ export class MapView extends THREE.EventDispatcher {
         // particular camera set up is not compatible with the debug camera.
         const debugCameraActive = this.m_pointOfView !== undefined;
 
-        if (
-            this.m_textElementsRenderer === undefined ||
-            !this.m_textElementsRenderer.ready ||
-            debugCameraActive
-        ) {
+        if (debugCameraActive) {
             return;
         }
 
-        if (this.checkIfTextElementsChanged() || this.checkIfTilesChanged()) {
-            this.m_textElementsRenderer.placeAllTileLabels();
-        }
-
-        // User TextElements have the priority when it comes to reserving screen space, so
-        // they are handled first. They will be rendered after the normal map objects and
-        // TextElements
-        this.m_textElementsRenderer.reset();
-        this.m_textElementsRenderer.renderUserTextElements(time, this.m_frameNumber);
-        this.m_textElementsRenderer.renderAllTileText(time, this.m_frameNumber);
-        this.m_textElementsRenderer.renderOverlay(this.m_overlayTextElements);
-        this.m_textElementsRenderer.update();
+        this.m_textElementsRenderer.placeText(
+            this.m_visibleTiles.dataSourceTileList,
+            this.projection,
+            time
+        );
     }
 
     private finishRenderTextElements() {
         const canRenderTextElements = this.m_pointOfView === undefined;
 
-        if (canRenderTextElements && this.m_textElementsRenderer) {
+        if (canRenderTextElements) {
             // copy far value from scene camera, as the distance to the POIs matter now.
-            this.m_screenCamera.far = this.m_camera.far;
+            this.m_screenCamera.far = this.m_viewRanges.maximum;
             this.m_textElementsRenderer.renderText(this.m_screenCamera);
         }
     }
 
     private initTheme() {
-        if (this.m_options.theme === undefined) {
-            return;
-        }
+        const theme = getOptionValue(this.m_options.theme, MapViewDefaults.theme);
 
-        const themePromise =
-            typeof this.m_options.theme === "string"
-                ? ThemeLoader.loadAsync(this.m_options.theme)
-                : Promise.resolve<Theme>(this.m_options.theme);
-
-        themePromise.then((theme: Theme) => {
-            this.theme = theme;
-            THEME_LOADED_EVENT.time = Date.now();
-            this.dispatchEvent(THEME_LOADED_EVENT);
-        });
+        this.m_themeIsLoading = true;
+        Promise.resolve<string | Theme>(theme)
+            // tslint:disable-next-line: no-shadowed-variable
+            .then(theme => ThemeLoader.load(theme, { uriResolver: this.m_uriResolver }))
+            // tslint:disable-next-line: no-shadowed-variable
+            .then(theme => {
+                this.m_themeIsLoading = false;
+                this.theme = theme;
+            })
+            .catch(error => {
+                this.m_themeIsLoading = false;
+                const themeName =
+                    typeof this.m_options.theme === "string" ? ` from ${this.m_options.theme}` : "";
+                logger.error(`Failed to load theme${themeName}: ${error}`, error);
+            });
     }
 
-    private setupCamera() {
+    private setupCamera(options: MapViewOptions) {
         const { width, height } = this.getCanvasClientSize();
 
-        const defaultGeoCenter = new GeoCoordinates(52.518611, 13.376111, 3000);
+        const defaultGeoCenter = MapViewDefaults.geoCenter;
 
         this.projection.projectPoint(defaultGeoCenter, this.m_camera.position);
 
@@ -2584,27 +3014,49 @@ export class MapView extends THREE.EventDispatcher {
             this.m_camera.lookAt(this.scene.position);
         }
 
-        this.m_lookAtDistance = defaultGeoCenter.altitude!;
+        this.m_targetDistance = defaultGeoCenter.altitude!;
 
         this.calculateFocalLength(height);
-
-        this.m_visibleTiles = new VisibleTileSet(
-            new FrustumIntersection(
-                this.m_camera,
-                this.m_visibleTileSetOptions.projection,
-                this.m_visibleTileSetOptions.extendedFrustumCulling
-            ),
-            this.m_tileGeometryManager,
-            this.m_visibleTileSetOptions
-        );
+        this.m_visibleTiles = this.createVisibleTileSet();
+        this.setInitialCameraPosition(options);
 
         // ### move & customize
         this.resize(width, height);
 
-        this.geoCenter = defaultGeoCenter;
-
         this.m_screenCamera.position.z = 1;
         this.m_screenCamera.near = 0;
+    }
+
+    private setInitialCameraPosition(options: MapViewOptions) {
+        const target = GeoCoordinates.fromObject(
+            getOptionValue(options.target, MapViewDefaults.target)
+        );
+        target.altitude = 0; // ensure that look at target has height of 0
+        const zoomLevel = getOptionValue(options.zoomLevel, MapViewDefaults.zoomLevel);
+        const tilt = getOptionValue(options.tilt, MapViewDefaults.tilt);
+        const heading = getOptionValue(options.heading, MapViewDefaults.heading);
+
+        this.lookAt(target, 300000, tilt, heading);
+        this.zoomLevel = zoomLevel;
+    }
+
+    private createVisibleTileSet(): VisibleTileSet {
+        const enableMixedLod =
+            this.m_enableMixedLod === undefined
+                ? this.projection.type === ProjectionType.Spherical
+                : this.m_enableMixedLod;
+
+        return new VisibleTileSet(
+            new FrustumIntersection(
+                this.m_camera,
+                this,
+                this.m_visibleTileSetOptions.extendedFrustumCulling,
+                this.m_tileWrappingEnabled,
+                enableMixedLod
+            ),
+            this.m_tileGeometryManager,
+            this.m_visibleTileSetOptions
+        );
     }
 
     private updateSkyBackground() {
@@ -2670,7 +3122,7 @@ export class MapView extends THREE.EventDispatcher {
             theme.lights.forEach((lightDescription: Light) => {
                 const light = createLight(lightDescription);
                 if (!light) {
-                    logger.log(
+                    logger.warn(
                         // tslint:disable-next-line: max-line-length
                         `MapView: failed to create light ${lightDescription.name} of type ${lightDescription.type}`
                     );
@@ -2683,45 +3135,28 @@ export class MapView extends THREE.EventDispatcher {
     }
 
     private movementStarted() {
-        if (this.m_textElementsRenderer !== undefined) {
-            this.m_textElementsRenderer.movementStarted();
-        }
+        this.m_textElementsRenderer.movementStarted();
+
         MOVEMENT_STARTED_EVENT.time = Date.now();
         this.dispatchEvent(MOVEMENT_STARTED_EVENT);
     }
 
     private movementFinished() {
-        if (this.m_textElementsRenderer !== undefined) {
-            this.m_textElementsRenderer.movementFinished();
-        }
+        this.m_textElementsRenderer.movementFinished();
+
         MOVEMENT_FINISHED_EVENT.time = Date.now();
         this.dispatchEvent(MOVEMENT_FINISHED_EVENT);
 
         // render at the next possible time.
         if (!this.animating) {
-            setTimeout(() => this.update(), 0);
+            if (this.m_movementFinishedUpdateTimerId !== undefined) {
+                clearTimeout(this.m_movementFinishedUpdateTimerId);
+            }
+            this.m_movementFinishedUpdateTimerId = setTimeout(() => {
+                this.m_movementFinishedUpdateTimerId = undefined;
+                this.update();
+            }, 0);
         }
-    }
-
-    /**
-     * Check if the `textElementsChanged` flag in any tile has been set to `true`. If any flag was
-     * `true`, this function returns `true`, and resets the flag in all tiles to `false`.
-     */
-    private checkIfTextElementsChanged() {
-        const renderList = this.m_visibleTiles.dataSourceTileList;
-
-        let textElementsChanged = false;
-
-        renderList.forEach(({ renderedTiles }) => {
-            renderedTiles.forEach(tile => {
-                if (tile.textElementsChanged) {
-                    tile.textElementsChanged = false;
-                    textElementsChanged = true;
-                }
-            });
-        });
-
-        return textElementsChanged;
     }
 
     /**
@@ -2791,7 +3226,7 @@ export class MapView extends THREE.EventDispatcher {
     private getRenderedTilesCopyrightInfo(): CopyrightInfo[] {
         let result: CopyrightInfo[] = [];
         for (const tileList of this.m_visibleTiles.dataSourceTileList) {
-            for (const tile of tileList.renderedTiles) {
+            for (const tile of tileList.renderedTiles.values()) {
                 const tileCopyrightInfo = tile.copyrightInfo;
                 if (tileCopyrightInfo === undefined || tileCopyrightInfo.length === 0) {
                     continue;
@@ -2837,7 +3272,10 @@ export class MapView extends THREE.EventDispatcher {
         this.poiTableManager.clear();
 
         // Add the POI tables defined in the theme.
-        this.poiTableManager.loadPoiTables(this.m_theme as Theme);
+        this.poiTableManager
+            .loadPoiTables(this.m_theme as Theme)
+            .then(() => this.update())
+            .catch(() => this.update());
     }
 
     private setupStats(enable: boolean) {
@@ -2852,63 +3290,73 @@ export class MapView extends THREE.EventDispatcher {
         this.m_scene.add(this.m_mapAnchors);
     }
 
-    /**
-     * Gradually initialize & update TextRenderer as assets arrive.
-     */
-    private updateTextRenderer() {
-        if (this.m_theme.textStyles === undefined) {
-            return;
+    private createTextRenderer(): TextElementsRenderer {
+        const updateCallback: ViewUpdateCallback = () => {
+            this.update();
+        };
+
+        return new TextElementsRenderer(
+            new MapViewState(this, this.checkIfTilesChanged.bind(this)),
+            this.m_camera,
+            updateCallback,
+            this.m_screenCollisions,
+            this.m_screenProjector,
+            new TextCanvasFactory(this.m_renderer),
+            this.m_poiManager,
+            new PoiRendererFactory(this),
+            new FontCatalogLoader(this.m_theme),
+            this.m_theme,
+            this.m_options
+        );
+    }
+
+    private resetTextRenderer(): void {
+        const overlayText = this.m_textElementsRenderer.overlayText;
+        this.m_textElementsRenderer = this.createTextRenderer();
+        if (overlayText !== undefined) {
+            this.m_textElementsRenderer.addOverlayText(overlayText);
         }
-        if (this.m_textElementsRenderer === undefined) {
-            this.m_textElementsRenderer = new TextElementsRenderer(
-                this,
-                this.m_screenCollisions,
-                this.m_screenProjector,
-                this.m_options.minNumGlyphs,
-                this.m_options.maxNumGlyphs,
-                this.m_theme,
-                this.m_options.maxNumVisibleLabels,
-                this.m_options.numSecondChanceLabels,
-                this.m_options.maxDistanceRatioForLabels,
-                this.m_options.labelStartScaleDistance
-            );
-        }
-        this.m_textElementsRenderer.placeAllTileLabels();
     }
 
     /**
-     * Default handler for webglcontextlost event
+     * Default handler for webglcontextlost event.
+     *
+     * Note: The renderer `this.m_renderer` may not be initialized when this function is called.
      */
     private onWebGLContextLost = (event: Event) => {
         this.dispatchEvent(CONTEXT_LOST_EVENT);
-        logger.log("WebGL context lost", event);
+        logger.warn("WebGL context lost", event);
     };
 
     /**
-     * Default handler for webglcontextrestored event
+     * Default handler for webglcontextrestored event.
+     *
+     * Note: The renderer `this.m_renderer` may not be initialized when this function is called.
      */
     private onWebGLContextRestored = (event: Event) => {
         this.dispatchEvent(CONTEXT_RESTORED_EVENT);
-        if (this.m_theme !== undefined && this.m_theme.clearColor !== undefined) {
-            this.m_renderer.setClearColor(new THREE.Color(this.m_theme.clearColor));
-        } else {
-            this.m_renderer.setClearColor(DEFAULT_CLEAR_COLOR);
+        if (this.m_renderer !== undefined) {
+            if (this.m_theme !== undefined && this.m_theme.clearColor !== undefined) {
+                this.m_renderer.setClearColor(new THREE.Color(this.m_theme.clearColor));
+            } else {
+                this.m_renderer.setClearColor(DEFAULT_CLEAR_COLOR);
+            }
+            this.update();
         }
-        this.update();
-        logger.log("WebGL context restored", event);
+        logger.warn("WebGL context restored", event);
     };
 
     private limitFov(fov: number, aspect: number): number {
-        fov = MathUtils.clamp(fov, MIN_FIELD_OF_VIEW, MAX_FIELD_OF_VIEW);
+        fov = THREE.Math.clamp(fov, MIN_FIELD_OF_VIEW, MAX_FIELD_OF_VIEW);
 
-        let hFov = MathUtils.radToDeg(
-            MapViewUtils.calculateHorizontalFovByVerticalFov(MathUtils.degToRad(fov), aspect)
+        let hFov = THREE.Math.radToDeg(
+            MapViewUtils.calculateHorizontalFovByVerticalFov(THREE.Math.degToRad(fov), aspect)
         );
 
         if (hFov > MAX_FIELD_OF_VIEW || hFov < MIN_FIELD_OF_VIEW) {
-            hFov = MathUtils.clamp(hFov, MIN_FIELD_OF_VIEW, MAX_FIELD_OF_VIEW);
-            fov = MathUtils.radToDeg(
-                MapViewUtils.calculateVerticalFovByHorizontalFov(MathUtils.degToRad(hFov), aspect)
+            hFov = THREE.Math.clamp(hFov, MIN_FIELD_OF_VIEW, MAX_FIELD_OF_VIEW);
+            fov = THREE.Math.radToDeg(
+                MapViewUtils.calculateVerticalFovByHorizontalFov(THREE.Math.degToRad(hFov), aspect)
             );
         }
         return fov as number;
@@ -2942,7 +3390,7 @@ export class MapView extends THREE.EventDispatcher {
     private calculateFocalLength(height: number) {
         assert(this.m_options.fovCalculation !== undefined);
         this.m_focalLength = MapViewUtils.calculateFocalLengthByVerticalFov(
-            MathUtils.degToRad(this.m_options.fovCalculation!.fov),
+            THREE.Math.degToRad(this.m_options.fovCalculation!.fov),
             height
         );
     }

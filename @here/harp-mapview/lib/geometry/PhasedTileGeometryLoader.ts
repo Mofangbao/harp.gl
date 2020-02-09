@@ -151,7 +151,7 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
      *      enabled.
      * @param {(GeometryKindSet | undefined)} disabledKinds The [[GeometryKind]]s that should be
      *      disabled.
-     * @returns {boolean} `true` if actual geometry has been created.
+     * @returns {boolean} `true` if `updateToPhase` was successful.
      */
     updateToPhase(
         toPhase: number,
@@ -161,10 +161,10 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
         let didUpdate = false;
         toPhase = Math.min(toPhase, this.numberOfPhases);
         while (this.currentPhase < toPhase) {
-            didUpdate = this.update(enabledKinds, disabledKinds);
-            if (!didUpdate) {
+            if (!this.update(enabledKinds, disabledKinds)) {
                 break;
             }
+            didUpdate = true;
         }
         return didUpdate;
     }
@@ -179,7 +179,9 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
      *      disabled.
      * @param doFullUpdate If a value of `true` is specified, the current phase is ignored and all
      *      remaining geometries are created.
-     * @returns {boolean} `true` if actual geometry has been created.
+     * @returns {boolean} `true` if `update` was successful. If `currentPhase` is smaller than
+     *      `numberOfPhases`, `update` can be called again. If `false` is returned, another call to
+     *      `update` is not required.
      */
     update(
         enabledKinds: GeometryKindSet | undefined,
@@ -200,7 +202,12 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
         // First time this tile is handled:
         if (decodedTile === undefined && tile.decodedTile !== undefined) {
             decodedTile = this.setDecodedTile(tile.decodedTile);
-            this.processTechniques(enabledKinds, disabledKinds);
+            TileGeometryCreator.instance.processTechniques(
+                decodedTile,
+                enabledKinds,
+                disabledKinds
+            );
+            tile.clear();
         }
 
         if (decodedTile === undefined || currentPhase >= this.numberOfPhases) {
@@ -257,6 +264,10 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
                         ? decodedTile.textPathGeometries.length
                         : 0
                 );
+                currentFrame.addValue(
+                    "geometryCount.numPathGeometries",
+                    decodedTile.pathGeometries !== undefined ? decodedTile.pathGeometries.length : 0
+                );
                 currentFrame.addMessage(
                     `Decoded tile: ${tile.dataSource.name} # lvl=${tile.tileKey.level} ` +
                         `col=${tile.tileKey.column} row=${tile.tileKey.row}`
@@ -274,6 +285,14 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
 
     dispose(): void {
         this.m_decodedTile = undefined;
+    }
+
+    reset(): void {
+        this.m_decodedTile = undefined;
+        this.m_isFinished = false;
+        this.m_availableGeometryKinds = undefined;
+        this.m_geometryKindsLoaded.clear();
+        this.m_currentPhaseIndex = 0;
     }
 
     /**
@@ -349,30 +368,6 @@ export class PhasedTileGeometryLoader implements TileGeometryLoader {
 
             geometryCreator.preparePois(tile, decodedTile);
         }
-    }
-
-    protected processTechniques(
-        enabledKinds: GeometryKindSet | undefined,
-        disabledKinds: GeometryKindSet | undefined
-    ): void {
-        const decodedTile = this.m_decodedTile;
-
-        if (decodedTile === undefined) {
-            return;
-        }
-
-        for (const technique of decodedTile.techniques) {
-            // Make sure that all technique have their geometryKind set, either from the Theme or
-            // their default value.
-            if (technique.kind === undefined) {
-                TileGeometryLoader.setDefaultGeometryKind(technique);
-            }
-        }
-
-        // Speedup and simplify following code: Test all techniques if they intersect with
-        // enabledKinds and disabledKinds, in which case they are flagged. The disabledKinds can be
-        // ignored hereafter.
-        TileGeometryCreator.instance.initDecodedTile(decodedTile, enabledKinds, disabledKinds);
     }
 
     private finish() {

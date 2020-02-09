@@ -5,7 +5,7 @@
  */
 
 import { GeoCoordinates, TileKey, TilingScheme } from "@here/harp-geoutils";
-import { DisplacementMap } from "./DisplacementMap";
+import { TileDisplacementMap } from "./DisplacementMap";
 
 export interface ElevationProvider {
     /**
@@ -13,8 +13,7 @@ export interface ElevationProvider {
      *
      * @param geoPoint geo position to query height for.
      * @param level Optional data level that should be used for getting the elevation.
-     *              If undefined the deepest available tile that contains the geoPoint will be
-     *              used.
+     *              If undefined, the view's visible tile containing the point will be used.
      * @returns The height at geoPoint or undefined if no tile was found that covers the geoPoint.
      */
     getHeight(geoPoint: GeoCoordinates, level?: number): number | undefined;
@@ -36,11 +35,16 @@ export interface ElevationProvider {
      * @returns Returns the DisplacmentMap for the given tileKey or a lower level tile. Undefined
      *          if the tile or no parent is in the cache.
      */
-    getDisplacementMap(tileKey: TileKey): DisplacementMap | undefined;
+    getDisplacementMap(tileKey: TileKey): TileDisplacementMap | undefined;
 
     /**
      * @returns the TilingScheme used for the DisplacementMaps returned by [[getDisplacementMap]] or
      * undefined if there is no elevation [[DataSource]] attached to the [[MapView]].
      */
     getTilingScheme(): TilingScheme | undefined;
+
+    /**
+     * Clears the internal cache.
+     */
+    clearCache(): void;
 }

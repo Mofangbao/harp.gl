@@ -14,18 +14,21 @@ import { Vector3Like } from "../math/Vector3Like";
 import { EarthConstants } from "./EarthConstants";
 import { Projection, ProjectionType } from "./Projection";
 
-const DEG2RAD = Math.PI / 180;
+import * as THREE from "three";
 
 class EquirectangularProjection extends Projection {
     static geoToWorldScale: number = 1.0 / (2.0 * Math.PI);
     static worldToGeoScale: number = (2.0 * Math.PI) / 1.0;
 
+    /** @override */
     readonly type: ProjectionType = ProjectionType.Planar;
 
+    /** @override */
     getScaleFactor(_worldPoint: Vector3Like): number {
         return 1;
     }
 
+    /** @override */
     worldExtent<WorldBoundingBox extends Box3Like>(
         minAltitude: number,
         maxAltitude: number,
@@ -43,6 +46,7 @@ class EquirectangularProjection extends Projection {
         return result;
     }
 
+    /** @override */
     projectPoint<WorldCoordinates extends Vector3Like>(
         geoPoint: GeoCoordinatesLike,
         result?: WorldCoordinates
@@ -62,17 +66,18 @@ class EquirectangularProjection extends Projection {
             result = { x: 0, y: 0, z: 0 } as WorldCoordinates;
         }
         result.x =
-            (geoPoint.longitude * DEG2RAD + Math.PI) *
+            (THREE.Math.degToRad(geoPoint.longitude) + Math.PI) *
             EquirectangularProjection.geoToWorldScale *
             this.unitScale;
         result.y =
-            (geoPoint.latitude * DEG2RAD + Math.PI * 0.5) *
+            (THREE.Math.degToRad(geoPoint.latitude) + Math.PI * 0.5) *
             EquirectangularProjection.geoToWorldScale *
             this.unitScale;
         result.z = geoPoint.altitude || 0;
         return result;
     }
 
+    /** @override */
     unprojectPoint(worldPoint: Vector3Like): GeoCoordinates {
         const geoPoint = GeoCoordinates.fromRadians(
             (worldPoint.y * EquirectangularProjection.worldToGeoScale) / this.unitScale -
@@ -83,10 +88,12 @@ class EquirectangularProjection extends Projection {
         return geoPoint;
     }
 
+    /** @override */
     unprojectAltitude(worldPoint: Vector3Like): number {
         return worldPoint.z;
     }
 
+    /** @override */
     projectBox<WorldBoundingBox extends Box3Like | OrientedBox3Like>(
         geoBox: GeoBox,
         result?: WorldBoundingBox
@@ -126,21 +133,25 @@ class EquirectangularProjection extends Projection {
         return result;
     }
 
+    /** @override */
     unprojectBox(worldBox: Box3Like): GeoBox {
         const minGeo = this.unprojectPoint(worldBox.min);
         const maxGeo = this.unprojectPoint(worldBox.max);
         return GeoBox.fromCoordinates(minGeo, maxGeo);
     }
 
+    /** @override */
     groundDistance(worldPoint: Vector3Like): number {
         return worldPoint.z;
     }
 
+    /** @override */
     scalePointToSurface(worldPoint: Vector3Like): Vector3Like {
         worldPoint.z = 0;
         return worldPoint;
     }
 
+    /** @override */
     surfaceNormal(_worldPoint: Vector3Like, normal?: Vector3Like) {
         if (normal === undefined) {
             normal = { x: 0, y: 0, z: 1 };

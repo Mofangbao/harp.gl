@@ -1,6 +1,6 @@
 {
     "name": "@here/harp-debug-datasource",
-    "version": "0.3.4",
+    "version": "0.12.0",
     "description": "Overlay useful for debugging map data",
     "main": "index.js",
     "typings": "index",
@@ -24,22 +24,23 @@
     },
     "license": "Apache-2.0",
     "dependencies": {
-        "@here/harp-geoutils": "^0.4.3",
-        "@here/harp-lrucache": "^0.2.6",
-        "@here/harp-mapview": "^0.9.4"
+        "@here/harp-geoutils": "^0.12.0",
+        "@here/harp-lrucache": "^0.12.0",
+        "@here/harp-mapview": "^0.12.0",
+        "@here/harp-text-canvas": "^0.12.0"
     },
     "devDependencies": {
         "@types/chai": "^4.1.2",
         "@types/mocha": "^5.2.7",
         "@types/node": "^12.0.8",
         "chai": "^4.0.2",
-        "cross-env": "^5.2.0",
+        "cross-env": "^6.0.3",
         "mocha": "^6.1.4",
         "source-map-support": "^0.5.2",
-        "typescript": "^3.5.2"
+        "typescript": "^3.7.2"
     },
     "peerDependencies": {
-        "three": "^0.105.2"
+        "three": "^0.112.1"
     },
     "publishConfig": {
         "access": "public"

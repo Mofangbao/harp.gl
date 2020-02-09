@@ -3,16 +3,25 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
-import { hereTilingScheme, TileKey } from "@here/harp-geoutils";
+import {
+    hereTilingScheme,
+    mercatorProjection,
+    Projection,
+    sphereProjection,
+    TileKey
+} from "@here/harp-geoutils";
+import { getOptionValue } from "@here/harp-utils";
 import { assert, expect } from "chai";
 import * as sinon from "sinon";
 import * as THREE from "three";
 
+import { createDefaultClipPlanesEvaluator } from "../lib/ClipPlanesEvaluator";
 import { DataSource } from "../lib/DataSource";
 import { FrustumIntersection } from "../lib/FrustumIntersection";
 import { SimpleTileGeometryManager } from "../lib/geometry/TileGeometryManager";
 import { MapView, MapViewDefaults } from "../lib/MapView";
 import { Tile } from "../lib/Tile";
+import { TileOffsetUtils } from "../lib/Utils";
 import { VisibleTileSet } from "../lib/VisibleTileSet";
 import { FakeOmvDataSource } from "./FakeOmvDataSource";
 
@@ -20,9 +29,24 @@ import { FakeOmvDataSource } from "./FakeOmvDataSource";
 //    Mocha discourages using arrow functions, see https://mochajs.org/#arrow-functions
 
 class FakeMapView {
+    constructor(readonly projection: Projection) {}
+
     get frameNumber(): number {
         return 0;
     }
+
+    get focalLength(): number {
+        // fov: 60
+        // height: 1080 px
+        // 1080 * 0.5 * Math.tan(THREE.Math.degToRad(60) * 0.5)
+        return 935.307436087;
+    }
+}
+
+interface FixtureOptions {
+    tileWrappingEnabled?: boolean;
+    enableMixedLod?: boolean;
+    projection?: Projection;
 }
 
 class Fixture {
@@ -34,23 +58,28 @@ class Fixture {
     frustumIntersection: FrustumIntersection;
     vts: VisibleTileSet;
 
-    constructor() {
+    constructor(params: FixtureOptions = {}) {
         this.worldCenter = new THREE.Vector3();
         this.camera = new THREE.PerspectiveCamera();
         this.ds = [new FakeOmvDataSource()];
-        this.mapView = new FakeMapView() as MapView;
+        this.mapView = new FakeMapView(
+            getOptionValue(params.projection, mercatorProjection)
+        ) as MapView;
+        (this.mapView as any).camera = this.camera;
         this.tileGeometryManager = new SimpleTileGeometryManager(this.mapView);
         this.ds[0].attach(this.mapView);
         this.frustumIntersection = new FrustumIntersection(
             this.camera,
-            MapViewDefaults.projection,
-            MapViewDefaults.extendedFrustumCulling
+            this.mapView,
+            MapViewDefaults.extendedFrustumCulling,
+            getOptionValue(params.tileWrappingEnabled, false),
+            getOptionValue(params.enableMixedLod, false)
         );
-        this.vts = new VisibleTileSet(
-            this.frustumIntersection,
-            this.tileGeometryManager,
-            MapViewDefaults
-        );
+        this.vts = new VisibleTileSet(this.frustumIntersection, this.tileGeometryManager, {
+            ...MapViewDefaults,
+            projection: getOptionValue(params.projection, mercatorProjection),
+            clipPlanesEvaluator: createDefaultClipPlanesEvaluator()
+        });
     }
 
     addDataSource(dataSource: DataSource) {
@@ -76,6 +105,7 @@ describe("VisibleTileSet", function() {
         camera.updateMatrixWorld(false);
     }
 
+    // TODO: Update for new interface of updateRenderList
     function updateRenderList(zoomLevel: number, storageLevel: number) {
         const intersectionCount = fixture.vts.updateRenderList(zoomLevel, storageLevel, fixture.ds);
         return { tileList: fixture.vts.dataSourceTileList, intersectionCount };
@@ -96,11 +126,11 @@ describe("VisibleTileSet", function() {
         assert.equal(dataSourceTileList[0].visibleTiles.length, 2);
 
         const visibleTiles = dataSourceTileList[0].visibleTiles;
-        assert.equal(visibleTiles[0].tileKey.mortonCode(), 371506851);
-        assert.equal(visibleTiles[1].tileKey.mortonCode(), 371506850);
+        assert.equal(visibleTiles[0].tileKey.mortonCode(), 371506850);
+        assert.equal(visibleTiles[1].tileKey.mortonCode(), 371506851);
 
         const renderedTiles = dataSourceTileList[0].renderedTiles;
-        assert.equal(renderedTiles.length, 0);
+        assert.equal(renderedTiles.size, 0);
     });
 
     it("#updateRenderList properly culls panorama of Berlin center", function() {
@@ -128,13 +158,13 @@ describe("VisibleTileSet", function() {
         const visibleTiles = dataSourceTileList[0].visibleTiles;
         assert.equal(visibleTiles[0].tileKey.mortonCode(), 371506849);
         assert.equal(visibleTiles[1].tileKey.mortonCode(), 371506848);
-        assert.equal(visibleTiles[2].tileKey.mortonCode(), 371506850);
+        assert.equal(visibleTiles[2].tileKey.mortonCode(), 371506165);
 
-        assert.equal(visibleTiles[3].tileKey.mortonCode(), 371506165);
-        assert.equal(visibleTiles[4].tileKey.mortonCode(), 371506827);
+        assert.equal(visibleTiles[3].tileKey.mortonCode(), 371506827);
+        assert.equal(visibleTiles[4].tileKey.mortonCode(), 371506850);
 
         const renderedTiles = dataSourceTileList[0].renderedTiles;
-        assert.equal(renderedTiles.length, 0);
+        assert.equal(renderedTiles.size, 0);
     });
 
     it("#updateRenderList properly finds parent loaded tiles in Berlin center", function() {
@@ -145,13 +175,12 @@ describe("VisibleTileSet", function() {
 
         // same as first found code few lines below
         const parentCode = TileKey.parentMortonCode(371506851);
+        const parentTileKey = TileKey.fromMortonCode(parentCode);
+        const parentKey = TileOffsetUtils.getKeyForTileKeyAndOffset(parentTileKey, 0);
 
         // fake MapView to think that it has already loaded
         // parent of both found tiles
-        const parentTile = fixture.vts.getTile(
-            fixture.ds[0],
-            TileKey.fromMortonCode(parentCode)
-        ) as Tile;
+        const parentTile = fixture.vts.getTile(fixture.ds[0], parentTileKey) as Tile;
         assert.exists(parentTile);
         parentTile.forceHasGeometry(true);
 
@@ -161,13 +190,14 @@ describe("VisibleTileSet", function() {
         assert.equal(dataSourceTileList[0].visibleTiles.length, 2);
 
         const visibleTiles = dataSourceTileList[0].visibleTiles;
-        assert.equal(visibleTiles[0].tileKey.mortonCode(), 371506851);
-        assert.equal(visibleTiles[1].tileKey.mortonCode(), 371506850);
+        assert.equal(visibleTiles[0].tileKey.mortonCode(), 371506850);
+        assert.equal(visibleTiles[1].tileKey.mortonCode(), 371506851);
 
         // some tiles are visible ^^^, but the parent is actually rendered
         const renderedTiles = dataSourceTileList[0].renderedTiles;
-        assert.equal(renderedTiles.length, 1);
-        assert.equal(renderedTiles[0].tileKey.mortonCode(), parentCode);
+        assert.equal(renderedTiles.size, 1);
+        assert(renderedTiles.has(parentKey));
+        assert.equal(renderedTiles.get(parentKey)!.tileKey.mortonCode(), parentCode);
     });
 
     it("#markTilesDirty properly handles cached & visible tiles", async function() {
@@ -185,7 +215,7 @@ describe("VisibleTileSet", function() {
             TileKey.fromMortonCode(parentTileKey)
         ) as Tile;
         const parentDisposeSpy = sinon.spy(parentTile, "dispose");
-        const parentReloadSpy = sinon.spy(parentTile, "reload");
+        const parentReloadSpy = sinon.spy(parentTile, "load");
 
         assert.equal(dataSourceTileList.length, 1);
         assert.equal(dataSourceTileList[0].visibleTiles.length, 2);
@@ -195,7 +225,7 @@ describe("VisibleTileSet", function() {
         );
 
         const visibleTileReloadSpies = dataSourceTileList[0].visibleTiles.map(tile =>
-            sinon.spy(tile, "reload")
+            sinon.spy(tile, "load")
         );
 
         fixture.vts.markTilesDirty();
@@ -239,5 +269,119 @@ describe("VisibleTileSet", function() {
             assert.equal(result.tileList.length, 2);
             assert(intersectionSpy.calledTwice);
         }
+    });
+
+    it("check MapView param tileWrappingEnabled disabled", async function() {
+        fixture = new Fixture({ tileWrappingEnabled: false, enableMixedLod: false });
+        fixture.worldCenter = new THREE.Vector3(0, 0, 0);
+        const camera = fixture.camera;
+        camera.aspect = 1.7541528239202657;
+        camera.far = 19000000;
+        camera.near = 34.82202253184507;
+        camera.fov = 60;
+        camera.setRotationFromEuler(
+            new THREE.Euler(0.9524476341218958, 0.3495283765291587, 0.23897332216617775, "XYZ")
+        );
+        camera.scale.set(1, 1, 1);
+        camera.position.set(0, 0, 348.2202253184507).add(fixture.worldCenter);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(false);
+
+        const zoomLevel = 15;
+        const storageLevel = 14;
+
+        const secondDataSource = new FakeOmvDataSource();
+        fixture.addDataSource(secondDataSource);
+        const result = updateRenderList(zoomLevel, storageLevel).tileList;
+        assert.equal(result[0].visibleTiles.length, 5);
+    });
+
+    it("check MapView param tileWrappingEnabled enabled", async function() {
+        fixture = new Fixture({ tileWrappingEnabled: true, enableMixedLod: false });
+        fixture.worldCenter = new THREE.Vector3(0, 0, 0);
+        const camera = fixture.camera;
+        camera.aspect = 1.7541528239202657;
+        camera.far = 19000000;
+        camera.near = 34.82202253184507;
+        camera.fov = 60;
+        camera.setRotationFromEuler(
+            new THREE.Euler(0.9524476341218958, 0.3495283765291587, 0.23897332216617775, "XYZ")
+        );
+        camera.scale.set(1, 1, 1);
+        camera.position.set(0, 0, 348.2202253184507).add(fixture.worldCenter);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(false);
+
+        const zoomLevel = 15;
+        const storageLevel = 14;
+
+        const secondDataSource = new FakeOmvDataSource();
+        fixture.addDataSource(secondDataSource);
+        const result = updateRenderList(zoomLevel, storageLevel).tileList;
+        assert.equal(result[0].visibleTiles.length, 16);
+    });
+
+    it("works with sphere projection", async function() {
+        fixture = new Fixture({
+            enableMixedLod: false,
+            projection: sphereProjection
+        });
+        fixture.worldCenter = new THREE.Vector3(
+            3788505.3859012993,
+            900242.0140512662,
+            5053901.557774652
+        );
+        const camera = fixture.camera;
+        camera.aspect = 1.7541528239202657;
+        camera.near = 1.0;
+        camera.far = 40000.0;
+        camera.fov = 60;
+        camera.setRotationFromEuler(
+            new THREE.Euler(-1.8255142103839737, 1.355215881912018, -2.910650891276035, "XYZ")
+        );
+        camera.scale.set(1, 1, 1);
+        camera.position.set(0, 0, 0).add(fixture.worldCenter);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(false);
+
+        const zoomLevel = 15;
+        const storageLevel = 14;
+
+        const secondDataSource = new FakeOmvDataSource();
+        fixture.addDataSource(secondDataSource);
+        const result = updateRenderList(zoomLevel, storageLevel).tileList;
+        assert.equal(result[0].visibleTiles.length, 100);
+    });
+
+    it("checks MapView param enableMixedLod", async function() {
+        fixture = new Fixture({
+            enableMixedLod: true,
+            projection: sphereProjection
+        });
+        fixture.worldCenter = new THREE.Vector3(
+            3788505.3859012993,
+            900242.0140512662,
+            5053901.557774652
+        );
+        const camera = fixture.camera;
+        camera.aspect = 1.7541528239202657;
+        camera.near = 1.0;
+        camera.far = 40000.0;
+        camera.fov = 60;
+        camera.setRotationFromEuler(
+            new THREE.Euler(-1.8255142103839737, 1.355215881912018, -2.910650891276035, "XYZ")
+        );
+        camera.scale.set(1, 1, 1);
+        camera.position.set(0, 0, 0).add(fixture.worldCenter);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(false);
+
+        const zoomLevel = 15;
+        const storageLevel = 14;
+
+        const secondDataSource = new FakeOmvDataSource();
+        fixture.addDataSource(secondDataSource);
+        const result = updateRenderList(zoomLevel, storageLevel).tileList;
+        assert.equal(result[0].visibleTiles.length, 100);
     });
 });

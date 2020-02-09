@@ -103,6 +103,7 @@ export class MSAARenderPass extends Pass {
      * @param camera The ThreeJS Camera instance to render the scene with.
      * @param writeBuffer A ThreeJS WebGLRenderTarget instance to render the scene to.
      * @param readBuffer A ThreeJS WebGLRenderTarget instance to render the scene.
+     * @override
      */
     render(
         renderer: THREE.WebGLRenderer,
@@ -212,6 +213,7 @@ export class MSAARenderPass extends Pass {
      *
      * @param width New width to apply to the render target.
      * @param height New height to apply to the render target.
+     * @override
      */
     setSize(width: number, height: number) {
         if (this.m_renderTarget) {
@@ -229,9 +231,26 @@ export class MSAARenderPass extends Pass {
     // tslint:disable-next-line:member-ordering
     static readonly OffsetVectors: number[][][] = [
         [[0, 0]],
-        [[4, 4], [-4, -4]],
-        [[-2, -6], [6, -2], [-6, 2], [2, 6]],
-        [[1, -3], [-1, 3], [5, 1], [-3, -5], [-5, 5], [-7, -1], [3, 7], [7, -7]],
+        [
+            [4, 4],
+            [-4, -4]
+        ],
+        [
+            [-2, -6],
+            [6, -2],
+            [-6, 2],
+            [2, 6]
+        ],
+        [
+            [1, -3],
+            [-1, 3],
+            [5, 1],
+            [-3, -5],
+            [-5, 5],
+            [-7, -1],
+            [3, 7],
+            [7, -7]
+        ],
         [
             [1, 1],
             [-1, -3],

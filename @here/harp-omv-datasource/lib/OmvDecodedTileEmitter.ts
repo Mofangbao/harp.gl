@@ -5,30 +5,35 @@
  */
 
 import {
+    AttributeMap,
     BufferAttribute,
     composeTechniqueTextureName,
     DecodedTile,
+    ExtendedTileInfo,
     ExtrudedPolygonTechnique,
     FillTechnique,
     Geometry,
     GeometryType,
-    getPropertyValue,
+    getFeatureId,
     Group,
     IndexedTechnique,
     InterleavedBufferAttribute,
-    isDashedLineTechnique,
     isExtrudedLineTechnique,
     isExtrudedPolygonTechnique,
     isFillTechnique,
+    isLabelRejectionLineTechnique,
     isLineMarkerTechnique,
     isLineTechnique,
     isPoiTechnique,
     isSolidLineTechnique,
+    isSpecialDashesLineTechnique,
     isStandardTechnique,
     isTextTechnique,
     LineMarkerTechnique,
+    PathGeometry,
     PoiGeometry,
     PoiTechnique,
+    StyleColor,
     Technique,
     TextGeometry,
     TextPathGeometry,
@@ -37,32 +42,42 @@ import {
     TextureCoordinateType
 } from "@here/harp-datasource-protocol";
 import {
-    addExtrudedWalls,
-    addPolygonEdges,
+    Env,
     IMeshBuffers,
-    MapEnv,
     StyleSetEvaluator,
     Value
 } from "@here/harp-datasource-protocol/index-decoder";
 import { LineGroup } from "@here/harp-lines/lib/Lines";
 import { triangulateLine } from "@here/harp-lines/lib/TriangulateLines";
-import { assert, LoggerManager, Math2D } from "@here/harp-utils";
+import { assert, getOptionValue, LoggerManager, Math2D } from "@here/harp-utils";
 import earcut from "earcut";
 import * as THREE from "three";
 
 import {
-    mercatorProjection,
     normalizedEquirectangularProjection,
     ProjectionType,
+    Vector3Like,
     webMercatorProjection
 } from "@here/harp-geoutils";
 
 import { ILineGeometry, IPolygonGeometry } from "./IGeometryProcessor";
 import { LinesGeometry } from "./OmvDataSource";
 import { IOmvEmitter, OmvDecoder, Ring } from "./OmvDecoder";
+import {
+    tile2world,
+    webMercatorTile2TargetTile,
+    webMercatorTile2TargetWorld,
+    world2tile
+} from "./OmvUtils";
 
-// tslint:disable-next-line: max-line-length
+import {
+    AttrEvaluationContext,
+    evaluateTechniqueAttr
+} from "@here/harp-datasource-protocol/lib/TechniqueAttr";
+// tslint:disable-next-line:max-line-length
 import { SphericalGeometrySubdivisionModifier } from "@here/harp-geometry/lib/SphericalGeometrySubdivisionModifier";
+import { ExtrusionFeatureDefs } from "@here/harp-materials/lib/MapMeshMaterialsDefs";
+import { clipPolygon } from "./clipPolygon";
 
 const logger = LoggerManager.instance.create("OmvDecodedTileEmitter");
 
@@ -71,6 +86,23 @@ const tempVertOrigin = new THREE.Vector3();
 const tempVertNormal = new THREE.Vector3();
 const tempFootDisp = new THREE.Vector3();
 const tempRoofDisp = new THREE.Vector3();
+
+const tmpV2 = new THREE.Vector2();
+const tmpV2r = new THREE.Vector2();
+const tmpV3 = new THREE.Vector3();
+const tmpV3r = new THREE.Vector3();
+const tmpV4 = new THREE.Vector3();
+
+const tempP0 = new THREE.Vector2();
+const tempP1 = new THREE.Vector2();
+const tempPreviousTangent = new THREE.Vector2();
+
+const tmpPointA = new THREE.Vector3();
+const tmpPointB = new THREE.Vector3();
+const tmpPointC = new THREE.Vector3();
+const tmpPointD = new THREE.Vector3();
+const tmpPointE = new THREE.Vector3();
+const tmpLine = new THREE.Line3();
 
 /**
  * Minimum number of pixels per character. Used during estimation if there is enough screen space
@@ -92,12 +124,19 @@ const MIN_AVERAGE_CHAR_WIDTH = 5;
 const SIZE_ESTIMATION_FACTOR = 0.5;
 
 /**
+ * Maximum allowed corner angle inside a label path.
+ */
+const MAX_CORNER_ANGLE = Math.PI / 8;
+
+/**
  * Used to identify an invalid (or better: unused) array index.
  */
 const INVALID_ARRAY_INDEX = -1;
+
 // for tilezen by default extrude all buildings even those without height data
 class MeshBuffers implements IMeshBuffers {
     readonly positions: number[] = [];
+    readonly normals: number[] = [];
     readonly textureCoordinates: number[] = [];
     readonly colors: number[] = [];
     readonly extrusionAxis: number[] = [];
@@ -110,15 +149,15 @@ class MeshBuffers implements IMeshBuffers {
     readonly imageTextures: number[] = [];
 
     /**
-     * Optional list of feature IDs. Currently only Number is supported, will fail if features have
-     * IDs with type Long.
-     */
-    readonly featureIds: Array<number | undefined> = [];
-
-    /**
      * Optional list of feature start indices. The indices point into the index attribute.
      */
     readonly featureStarts: number[] = [];
+
+    /**
+     * An optional list of additional data that can be used as additional data for the object
+     * picking.
+     */
+    readonly objInfos: AttributeMap[] = [];
 
     constructor(readonly type: GeometryType) {}
 
@@ -138,6 +177,9 @@ export enum LineType {
     Complex
 }
 
+type TexCoordsFunction = (tilePos: THREE.Vector2, tileExtents: number) => { u: number; v: number };
+const tmpColor = new THREE.Color();
+
 export class OmvDecodedTileEmitter implements IOmvEmitter {
     // mapping from style index to mesh buffers
     private readonly m_meshBuffers = new Map<number, MeshBuffers>();
@@ -145,18 +187,20 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
     private readonly m_geometries: Geometry[] = [];
     private readonly m_textGeometries: TextGeometry[] = [];
     private readonly m_textPathGeometries: TextPathGeometry[] = [];
+    private readonly m_pathGeometries: PathGeometry[] = [];
     private readonly m_poiGeometries: PoiGeometry[] = [];
     private readonly m_simpleLines: LinesGeometry[] = [];
     private readonly m_solidLines: LinesGeometry[] = [];
-    private readonly m_dashedLines: LinesGeometry[] = [];
 
     private readonly m_sources: string[] = [];
+    private m_maxGeometryHeight: number = 0;
 
     constructor(
         private readonly m_decodeInfo: OmvDecoder.DecodeInfo,
         private readonly m_styleSetEvaluator: StyleSetEvaluator,
-        private readonly m_gatherFeatureIds: boolean,
+        private readonly m_gatherFeatureAttributes: boolean,
         private readonly m_skipShortLabels: boolean,
+        private readonly m_enableElevationOverlay: boolean,
         private readonly m_languages?: string[]
     ) {}
 
@@ -172,18 +216,21 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the Point of Interest geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
-     * @param feature The current feature containing the main geometry.
+     * @param extents Tile's layer extents.
+     * @param geometry The current feature containing the main geometry.
      * @param env The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
      * @param featureId The id of the feature.
      */
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
-        env: MapEnv,
+        extents: number,
+        geometry: THREE.Vector2[],
+        context: AttrEvaluationContext,
         techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void {
+        const env = context.env;
         this.processFeatureCommon(env);
 
         for (const technique of techniques) {
@@ -198,7 +245,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 continue;
             }
 
-            const { positions, texts, featureIds, imageTextures } = meshBuffers;
+            const { positions, texts, imageTextures, objInfos } = meshBuffers;
 
             const shouldCreateTextGeometries =
                 isTextTechnique(technique) || isPoiTechnique(technique);
@@ -208,11 +255,11 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
 
             if (wantsPoi) {
                 const poiTechnique = technique as PoiTechnique;
-                imageTexture = poiTechnique.imageTexture;
+                imageTexture = evaluateTechniqueAttr(context, poiTechnique.imageTexture);
 
                 // TODO: Move to decoder independent parts of code.
-                if (typeof poiTechnique.poiName === "string") {
-                    imageTexture = poiTechnique.poiName;
+                if (poiTechnique.poiName !== undefined) {
+                    imageTexture = evaluateTechniqueAttr(context, poiTechnique.poiName);
                 } else if (typeof poiTechnique.poiNameField === "string") {
                     const poiNameFieldValue = env.lookup(poiTechnique.poiNameField) as string;
                     imageTexture = poiNameFieldValue;
@@ -222,29 +269,17 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 }
             }
 
-            const worldPos = new THREE.Vector3();
-
             for (const pos of geometry) {
-                const { x, y, z } = this.m_decodeInfo.targetProjection
-                    .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(this.m_decodeInfo.center);
                 if (shouldCreateTextGeometries) {
                     const textTechnique = technique as TextTechnique;
-                    const textLabel = textTechnique.label;
-                    const useAbbreviation = textTechnique.useAbbreviation as boolean;
-                    const useIsoCode = textTechnique.useIsoCode as boolean;
-                    const name: Value =
-                        typeof textLabel === "string"
-                            ? env.lookup(textLabel)
-                            : OmvDecoder.getFeatureName(
-                                  env,
-                                  useAbbreviation,
-                                  useIsoCode,
-                                  this.m_languages
-                              );
+                    const text = ExtendedTileInfo.getFeatureText(
+                        context,
+                        textTechnique,
+                        this.m_languages
+                    );
 
-                    if (name && typeof name === "string") {
-                        texts.push(meshBuffers.addText(name));
+                    if (text !== undefined && text.length > 0) {
+                        texts.push(meshBuffers.addText(text));
                     } else {
                         texts.push(INVALID_ARRAY_INDEX);
                     }
@@ -252,12 +287,17 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
 
                 // Always store the position, otherwise the following POIs will be
                 // misplaced.
-                positions.push(x, y, z);
-
-                if (this.m_gatherFeatureIds) {
-                    featureIds.push(featureId);
+                if (shouldCreateTextGeometries) {
+                    webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV3);
+                } else {
+                    webMercatorTile2TargetTile(extents, this.m_decodeInfo, pos, tmpV3);
                 }
-                if (isPoiTechnique) {
+                positions.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                objInfos.push(
+                    this.m_gatherFeatureAttributes ? env.entries : getFeatureId(env.entries)
+                );
+
+                if (wantsPoi) {
                     if (imageTexture === undefined) {
                         imageTextures.push(INVALID_ARRAY_INDEX);
                     } else {
@@ -273,39 +313,189 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the line geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
-     * @param feature The current feature containing the main geometry.
+     * @param extents Tile's layer extents.
+     * @param geometry The current feature containing the main geometry.
      * @param env The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
      * @param featureId The id of the feature.
      */
     processLineFeature(
         layer: string,
+        extents: number,
         geometry: ILineGeometry[],
-        env: MapEnv,
+        context: AttrEvaluationContext,
         techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void {
+        const env = context.env;
         this.processFeatureCommon(env);
 
-        const lines: number[][] = [];
-
-        const worldPos = new THREE.Vector3();
-
-        const { targetProjection, center, projectedTileBounds } = this.m_decodeInfo;
+        const localLines: number[][] = []; // lines in target tile space.
+        const worldLines: number[][] = []; // lines in world space.
+        const uvs: number[][] = [];
+        const offsets: number[][] = [];
+        const { projectedTileBounds } = this.m_decodeInfo;
+        let localLineSegments: number[][]; // lines in target tile space for special dashes.
 
         const tileWidth = projectedTileBounds.max.x - projectedTileBounds.min.x;
         const tileHeight = projectedTileBounds.max.y - projectedTileBounds.min.y;
         const tileSizeInMeters = Math.max(tileWidth, tileHeight);
 
+        let computeTexCoords: TexCoordsFunction | undefined;
+        let texCoordinateType: TextureCoordinateType | undefined;
+
+        const hasUntiledLines = geometry[0].untiledPositions !== undefined;
+
+        // If true, special handling for dashes is required (round and diamond shaped dashes).
+        let hasIndividualLineSegments = false;
+        let hasContinuousLineSegments = false;
+
+        // Check if any of the techniques needs texture coordinates
+        for (const technique of techniques) {
+            if (technique === undefined) {
+                continue;
+            }
+            if (!computeTexCoords) {
+                computeTexCoords = this.getComputeTexCoordsFunc(technique);
+                texCoordinateType = this.getTextureCoordinateType(technique);
+            } else {
+                // Support generation of only one type of texture coordinates.
+                const otherTexCoordType = this.getTextureCoordinateType(technique);
+                assert(otherTexCoordType === undefined || texCoordinateType === otherTexCoordType);
+            }
+
+            hasIndividualLineSegments =
+                hasIndividualLineSegments || isSpecialDashesLineTechnique(technique);
+
+            hasContinuousLineSegments = hasContinuousLineSegments || !hasIndividualLineSegments;
+        }
+
         for (const polyline of geometry) {
-            const line: number[] = [];
-            polyline.positions.forEach(pos => {
-                const { x, y, z } = targetProjection
-                    .reprojectPoint(webMercatorProjection, pos, worldPos)
-                    .sub(center);
-                line.push(x, y, z);
-            });
-            lines.push(line);
+            // Compute the world position of the untiled line and its distance to the origin of the
+            // line to properly join lines.
+            const untiledLine: number[] = [];
+            let lineDist = 0;
+            if (hasUntiledLines) {
+                this.m_decodeInfo.targetProjection.projectPoint(
+                    polyline.untiledPositions![0],
+                    tmpV3r
+                );
+                polyline.untiledPositions!.forEach(pos => {
+                    // Calculate the distance to the next un-normalized point.
+                    this.m_decodeInfo.targetProjection.projectPoint(pos, tmpV3);
+                    lineDist += tmpV3.distanceTo(tmpV3r);
+                    tmpV3r.copy(tmpV3);
+
+                    // Pushed the normalized point for line matching.
+                    this.m_decodeInfo.targetProjection.projectPoint(pos.normalized(), tmpV3);
+                    untiledLine.push(tmpV3.x, tmpV3.y, tmpV3.z, lineDist);
+                });
+            }
+
+            // Add continuous line as individual segments to improve special dashes by overlapping
+            // their connecting vertices. The technique/style should defined round or rectangular
+            // caps.
+            if (hasIndividualLineSegments) {
+                localLineSegments = [];
+
+                // Compute length of whole line and offsets of individual segments.
+                let lineLength = 0;
+                const pointCount = polyline.positions.length;
+                if (pointCount > 1) {
+                    let lastSegmentOffset = 0;
+
+                    for (let i = 0; i < pointCount - 1; i++) {
+                        const localLine: number[] = [];
+                        const worldLine: number[] = [];
+                        const lineUvs: number[] = [];
+                        const segmentOffsets: number[] = [];
+
+                        const pos1 = polyline.positions[i];
+                        const pos2 = polyline.positions[i + 1];
+                        webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos1, tmpV3);
+                        worldLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                        webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos2, tmpV4);
+                        worldLine.push(tmpV4.x, tmpV4.y, tmpV4.z);
+
+                        if (computeTexCoords) {
+                            {
+                                const { u, v } = computeTexCoords(pos1, extents);
+                                lineUvs.push(u, v);
+                            }
+                            {
+                                const { u, v } = computeTexCoords(pos2, extents);
+                                lineUvs.push(u, v);
+                            }
+                        }
+                        if (hasUntiledLines) {
+                            // Find where in the [0...1] range relative to the line our current
+                            // vertex lies.
+                            let offset =
+                                this.findRelativePositionInLine(tmpV3, untiledLine) / lineDist;
+                            segmentOffsets.push(offset);
+                            offset = this.findRelativePositionInLine(tmpV4, untiledLine) / lineDist;
+                            segmentOffsets.push(offset);
+                        } else {
+                            segmentOffsets.push(lastSegmentOffset);
+
+                            // Compute length of segment and whole line to scale down later.
+                            const segmentLength = tmpV3.distanceTo(tmpV4);
+                            lineLength += segmentLength;
+                            lastSegmentOffset += segmentLength;
+                            segmentOffsets.push(lastSegmentOffset);
+                        }
+
+                        tmpV3.sub(this.m_decodeInfo.center);
+                        localLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                        tmpV4.sub(this.m_decodeInfo.center);
+                        localLine.push(tmpV4.x, tmpV4.y, tmpV4.z);
+
+                        localLineSegments!.push(localLine);
+                        worldLines.push(worldLine);
+                        uvs.push(lineUvs);
+                        offsets.push(segmentOffsets);
+                    }
+                }
+
+                if (!hasUntiledLines && lineLength > 0) {
+                    // Scale down each individual segment to range [0..1] for whole line.
+                    for (const segOffsets of offsets) {
+                        segOffsets.forEach((offs, index) => {
+                            segOffsets[index] = offs / lineLength;
+                        });
+                    }
+                }
+            }
+
+            // Add continuous lines
+            if (hasContinuousLineSegments) {
+                const localLine: number[] = [];
+                const worldLine: number[] = [];
+                const lineUvs: number[] = [];
+                const lineOffsets: number[] = [];
+                polyline.positions.forEach(pos => {
+                    webMercatorTile2TargetWorld(extents, this.m_decodeInfo, pos, tmpV3);
+                    worldLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
+
+                    if (computeTexCoords) {
+                        const { u, v } = computeTexCoords(pos, extents);
+                        lineUvs.push(u, v);
+                    }
+                    if (hasUntiledLines) {
+                        // Find where in the [0...1] range relative to the line our current vertex
+                        // lines.
+                        const offset =
+                            this.findRelativePositionInLine(tmpV3, untiledLine) / lineDist;
+                        lineOffsets.push(offset);
+                    }
+                    tmpV3.sub(this.m_decodeInfo.center);
+                    localLine.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                });
+                localLines.push(localLine);
+                worldLines.push(worldLine);
+                uvs.push(lineUvs);
+                offsets.push(lineOffsets);
+            }
         }
 
         const wantCircle = this.m_decodeInfo.tileKey.level >= 11;
@@ -314,106 +504,86 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
             if (technique === undefined) {
                 continue;
             }
-
             const techniqueIndex = technique._index;
             const techniqueName = technique.name;
 
-            if (
-                techniqueName === "line" ||
-                techniqueName === "solid-line" ||
-                techniqueName === "dashed-line"
-            ) {
-                const lineGeometry =
-                    techniqueName === "line"
-                        ? this.m_simpleLines
-                        : techniqueName === "solid-line"
-                        ? this.m_solidLines
-                        : this.m_dashedLines;
+            if (isLineTechnique(technique) || isSolidLineTechnique(technique)) {
+                const lineGeometry = isLineTechnique(technique)
+                    ? this.m_simpleLines
+                    : this.m_solidLines;
 
-                const lineType = techniqueName === "line" ? LineType.Simple : LineType.Complex;
+                const lineType = isLineTechnique(technique) ? LineType.Simple : LineType.Complex;
 
-                this.applyLineTechnique(
-                    lineGeometry,
-                    technique,
-                    techniqueIndex,
-                    this.m_gatherFeatureIds,
-                    lineType,
-                    featureId,
-                    lines,
-                    env
-                );
+                if (hasIndividualLineSegments) {
+                    assert(
+                        localLineSegments! !== undefined,
+                        "OmvDecodedTileEmitter#processLineFeature: " +
+                            "Internal error - No localLineSegments"
+                    );
+
+                    this.applyLineTechnique(
+                        lineGeometry,
+                        technique,
+                        techniqueIndex,
+                        lineType,
+                        env.entries,
+                        localLineSegments!,
+                        context,
+                        this.getTextureCoordinateType(technique) ? uvs : undefined,
+                        offsets
+                    );
+                }
+                if (localLines.length > 0) {
+                    this.applyLineTechnique(
+                        lineGeometry,
+                        technique,
+                        techniqueIndex,
+                        lineType,
+                        env.entries,
+                        localLines,
+                        context,
+                        this.getTextureCoordinateType(technique) ? uvs : undefined,
+                        hasUntiledLines ? offsets : undefined
+                    );
+                }
             } else if (
                 isTextTechnique(technique) ||
                 isPoiTechnique(technique) ||
                 isLineMarkerTechnique(technique)
             ) {
                 const textTechnique = technique as TextTechnique;
-                const textLabel = textTechnique.label;
-                const useAbbreviation = textTechnique.useAbbreviation as boolean;
-                const useIsoCode = textTechnique.useIsoCode as boolean;
-                let text: Value =
-                    typeof textLabel === "string"
-                        ? env.lookup(textLabel)
-                        : OmvDecoder.getFeatureName(
-                              env,
-                              useAbbreviation,
-                              useIsoCode,
-                              this.m_languages
-                          );
+                const text = ExtendedTileInfo.getFeatureText(
+                    context,
+                    textTechnique,
+                    this.m_languages
+                );
 
-                let validLines: number[][] = [];
-
-                if (text === undefined) {
+                if (text === undefined || text.length === 0) {
                     continue;
                 }
-                text = String(text);
+                let validLines: number[][] = [];
 
                 if (this.m_skipShortLabels) {
-                    // Filter the lines, keep only those that are long enough for labelling.
-                    validLines = [];
+                    // Filter the lines, keep only those that are long enough for labelling. Also,
+                    // split jagged label paths to keep processing and rendering only those that
+                    // have no sharp corners, which would not be rendered anyway.
 
                     const metersPerPixel = tileSizeInMeters / this.m_decodeInfo.tileSizeOnScreen;
-                    const minTileSpace =
+                    const minEstimatedLabelLength =
                         MIN_AVERAGE_CHAR_WIDTH *
                         text.length *
                         metersPerPixel *
                         SIZE_ESTIMATION_FACTOR;
+                    const minEstimatedLabelLengthSqr =
+                        minEstimatedLabelLength * minEstimatedLabelLength;
 
-                    // Estimate if the line is long enough for the label, otherwise ignore it for
-                    // rendering text. First, compute the bounding box in world coordinates.
-                    for (const aLine of lines) {
-                        let minX = Number.MAX_SAFE_INTEGER;
-                        let maxX = Number.MIN_SAFE_INTEGER;
-                        let minY = Number.MAX_SAFE_INTEGER;
-                        let maxY = Number.MIN_SAFE_INTEGER;
-                        for (let i = 0; i < aLine.length; i += 3) {
-                            const x = aLine[i];
-                            const y = aLine[i + 1];
-                            if (x < minX) {
-                                minX = x;
-                            }
-                            if (x > maxX) {
-                                maxX = x;
-                            }
-                            if (y < minY) {
-                                minY = y;
-                            }
-                            if (y > maxY) {
-                                maxY = y;
-                            }
-                        }
-
-                        // Check if the diagonal of the bounding box would be long enough to fit the
-                        // label text:
-                        if (
-                            (maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY) >=
-                            minTileSpace * minTileSpace
-                        ) {
-                            validLines.push(aLine);
-                        }
-                    }
+                    validLines = this.splitJaggyLines(
+                        worldLines,
+                        minEstimatedLabelLengthSqr,
+                        MAX_CORNER_ANGLE
+                    );
                 } else {
-                    validLines = lines;
+                    validLines = worldLines;
                 }
 
                 if (validLines.length === 0) {
@@ -424,19 +594,28 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                     if (text === undefined) {
                         continue;
                     }
-                    for (const aLine of validLines) {
-                        const pathLengthSqr = Math2D.computeSquaredLineLength(aLine);
+                    for (const path of validLines) {
+                        const pathLengthSqr = Math2D.computeSquaredLineLength(path);
                         this.m_textPathGeometries.push({
                             technique: techniqueIndex,
-                            path: aLine,
+                            path,
                             pathLengthSqr,
                             text: String(text),
-                            featureId
+                            objInfos: this.m_gatherFeatureAttributes
+                                ? env.entries
+                                : getFeatureId(env.entries)
                         });
                     }
                 } else {
                     const lineMarkerTechnique = technique as LineMarkerTechnique;
-                    let imageTexture = lineMarkerTechnique.imageTexture;
+
+                    let imageTexture = evaluateTechniqueAttr(
+                        context,
+                        lineMarkerTechnique.imageTexture
+                    );
+
+                    // TODO: `imageTextureField` and `imageTexturePrefix` and `imageTexturePostfix`
+                    // are now deprecated
 
                     // TODO: Move to decoder independent parts of code.
                     if (typeof lineMarkerTechnique.imageTextureField === "string") {
@@ -462,9 +641,21 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                             texts: [0],
                             stringCatalog: [text, imageTexture],
                             imageTextures: [1],
-                            featureId
+                            objInfos: this.m_gatherFeatureAttributes
+                                ? [env.entries]
+                                : [getFeatureId(env.entries)]
                         });
                     }
+                }
+            } else if (isLabelRejectionLineTechnique(technique)) {
+                for (const path of worldLines) {
+                    const worldPath: Vector3Like[] = [];
+                    for (let i = 0; i < path.length; i += 3) {
+                        worldPath.push(new THREE.Vector3().fromArray(path, i) as Vector3Like);
+                    }
+                    this.m_pathGeometries.push({
+                        path: worldPath
+                    });
                 }
             } else if (isExtrudedLineTechnique(technique)) {
                 const meshBuffers = this.findOrCreateMeshBuffers(
@@ -474,28 +665,29 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 if (meshBuffers === undefined) {
                     continue;
                 }
-                const { positions, indices, groups, featureIds, featureStarts } = meshBuffers;
+                const { positions, indices, groups, featureStarts, objInfos } = meshBuffers;
                 const start = indices.length;
 
-                const lineWidth = getPropertyValue(
-                    technique.lineWidth,
-                    this.m_decodeInfo.tileKey.level
-                );
+                const lineWidth = evaluateTechniqueAttr<number>(context, technique.lineWidth);
 
                 if (lineWidth === undefined) {
                     continue;
                 }
 
-                const addCircle =
-                    wantCircle && (technique.caps === undefined || technique.caps === "Circle");
+                const techniqueCaps = evaluateTechniqueAttr<string>(
+                    context,
+                    technique.caps,
+                    "Circle"
+                );
 
-                lines.forEach(aLine => {
+                const addCircle = wantCircle && techniqueCaps === "Circle";
+
+                localLines.forEach(aLine => {
                     triangulateLine(aLine, lineWidth, positions, indices, addCircle);
-
-                    if (this.m_gatherFeatureIds && featureIds && featureStarts) {
-                        featureIds.push(featureId);
-                        featureStarts.push(start);
-                    }
+                    featureStarts.push(start);
+                    objInfos.push(
+                        this.m_gatherFeatureAttributes ? env.entries : getFeatureId(env.entries)
+                    );
                 });
 
                 const count = indices.length - start;
@@ -513,21 +705,22 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
      * Creates the polygons geometries for the given feature.
      *
      * @param layer Tile's layer to be processed.
-     * @param feature The current feature containing the main geometry.
-     * @param env The [[MapEnv]] containing the environment information for the map.
+     * @param extents Tile's layer extents.
+     * @param geometry The current feature containing the main geometry.
+     * @param feature The [[MapEnv]] containing the environment information for the map.
      * @param techniques The array of [[Technique]] that will be applied to the geometry.
      * @param featureId The id of the feature.
      */
     processPolygonFeature(
         layer: string,
+        extents: number,
         geometry: IPolygonGeometry[],
-        env: MapEnv,
+        context: AttrEvaluationContext,
         techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void {
+        const env = context.env;
         this.processFeatureCommon(env);
-
-        const { targetProjection, center } = this.m_decodeInfo;
 
         techniques.forEach(technique => {
             if (technique === undefined) {
@@ -543,129 +736,190 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 );
             }
 
-            const extrudedPolygonTechnique = technique as ExtrudedPolygonTechnique;
-            const fillTechnique = technique as FillTechnique;
-
             const polygons: Ring[][] = [];
-
-            const worldPos = new THREE.Vector3();
 
             const isExtruded = isExtrudedPolygonTechnique(technique);
             const isFilled = isFillTechnique(technique);
-            const texCoordType = textureCoordinateType(technique);
+            const isStandard = isStandardTechnique(technique);
 
-            const isLine =
-                isSolidLineTechnique(technique) ||
-                isDashedLineTechnique(technique) ||
-                isLineTechnique(technique);
-            const isPolygon = isExtruded || isFilled || isStandardTechnique(technique);
+            const isPolygon = isExtruded || isFilled || isStandard;
+            const computeTexCoords = this.getComputeTexCoordsFunc(technique);
+            const vertexStride = computeTexCoords !== undefined ? 4 : 2;
 
-            const edgeWidth = isExtruded
-                ? extrudedPolygonTechnique.lineWidth || 0.0
-                : isFilled
-                ? fillTechnique.lineWidth || 0.0
-                : 0.0;
-            const hasEdges = edgeWidth > 0.0 || isLine;
-
-            const isSpherical = targetProjection.type === ProjectionType.Spherical;
-
-            const tempTexcoords = new THREE.Vector3();
-
-            const computeTexCoords =
-                texCoordType === TextureCoordinateType.TileSpace
-                    ? (pos: THREE.Vector3) => {
-                          const { x: u, y: v } = tempTexcoords
-                              .copy(pos)
-                              .sub(this.m_decodeInfo.tileBounds.min)
-                              .divide(this.m_decodeInfo.tileSize);
-                          return { u, v: 1 - v };
-                      }
-                    : texCoordType === TextureCoordinateType.EquirectangularSpace
-                    ? (pos: THREE.Vector3) => {
-                          const { x: u, y: v } = normalizedEquirectangularProjection.reprojectPoint(
-                              webMercatorProjection,
-                              pos
-                          );
-                          return { u, v };
-                      }
-                    : undefined;
-
-            const vertexStride = computeTexCoords !== undefined ? 5 : 3;
+            let clipRing: THREE.Vector2[] | undefined;
 
             for (const polygon of geometry) {
                 const rings: Ring[] = [];
 
                 for (const outline of polygon.rings) {
                     const ringContour: number[] = [];
-                    const ringPoints: number[] | undefined = isSpherical ? [] : undefined;
-                    let ringEdges: boolean[] | undefined;
 
-                    for (let coordIdx = 0; coordIdx < outline.positions.length; ++coordIdx) {
-                        const pos = outline.positions[coordIdx];
-                        targetProjection
-                            .reprojectPoint(webMercatorProjection, pos, worldPos)
-                            .sub(center);
+                    let coords = outline;
 
-                        ringContour.push(worldPos.x, worldPos.y, worldPos.z);
-
-                        if (ringPoints !== undefined) {
-                            mercatorProjection.reprojectPoint(webMercatorProjection, pos, worldPos);
-
-                            ringPoints.push(worldPos.x, worldPos.y, worldPos.z);
+                    if (isFilled || isStandard) {
+                        if (!clipRing) {
+                            clipRing = [
+                                new THREE.Vector2(0, 0),
+                                new THREE.Vector2(extents, 0),
+                                new THREE.Vector2(extents, extents),
+                                new THREE.Vector2(0, extents)
+                            ];
                         }
+                        coords = clipPolygon(coords, clipRing);
+                    }
 
-                        if (hasEdges && outline.outlines !== undefined) {
-                            const edge = outline.outlines[coordIdx];
-                            if (ringEdges === undefined) {
-                                ringEdges = [edge];
-                            } else {
-                                ringEdges.push(edge);
-                            }
-                        }
+                    if (coords.length === 0) {
+                        continue;
+                    }
 
+                    for (const coord of coords) {
+                        ringContour.push(coord.x, coord.y);
                         if (computeTexCoords !== undefined) {
-                            const { u, v } = computeTexCoords(pos);
+                            const { u, v } = computeTexCoords(coord, extents);
                             ringContour.push(u, v);
-                            if (ringPoints !== undefined) {
-                                ringPoints.push(u, v);
-                            }
                         }
                     }
 
-                    rings.push(new Ring(vertexStride, ringContour, ringEdges, ringPoints));
+                    rings.push(new Ring(extents, vertexStride, ringContour));
+                }
+
+                if (rings.length === 0) {
+                    continue;
                 }
 
                 polygons.push(rings);
             }
 
+            const isLine = isSolidLineTechnique(technique) || isLineTechnique(technique);
             if (isPolygon) {
-                this.applyPolygonTechnique(polygons, technique, techniqueIndex, featureId, env);
+                this.applyPolygonTechnique(
+                    polygons,
+                    technique,
+                    techniqueIndex,
+                    featureId,
+                    context,
+                    extents
+                );
             } else if (isLine) {
                 const lineGeometry =
-                    technique.name === "line"
-                        ? this.m_simpleLines
-                        : technique.name === "solid-line"
-                        ? this.m_solidLines
-                        : this.m_dashedLines;
+                    technique.name === "line" ? this.m_simpleLines : this.m_solidLines;
 
                 const lineType = technique.name === "line" ? LineType.Simple : LineType.Complex;
+
+                // Use individual line segments instead of a continuous line in special cases (round
+                // and diamond shaped dashes).
+                const needIndividualLineSegments = isSpecialDashesLineTechnique(technique);
+
                 polygons.forEach(rings => {
+                    const lines: number[][] = [];
+                    const offsets: number[][] | undefined = needIndividualLineSegments
+                        ? []
+                        : undefined;
                     rings.forEach(ring => {
-                        const lines = ring.getOutlines();
-                        if (lines.length === 0) {
-                            return;
+                        const length = ring.contour.length / ring.vertexStride;
+                        let line: number[] = [];
+
+                        // Compute length of whole line and offsets of individual segments.
+                        let ringLength = 0;
+                        let lastSegmentOffset = 0;
+                        let segmentOffsets: number[] | undefined = needIndividualLineSegments
+                            ? []
+                            : undefined;
+
+                        for (let i = 0; i < length; ++i) {
+                            if (needIndividualLineSegments && line.length > 0) {
+                                // Allocate a line for every segment.
+                                line = [];
+                                segmentOffsets = [];
+                            }
+
+                            const nextIdx = (i + 1) % length;
+                            const currX = ring.contour[i * ring.vertexStride];
+                            const currY = ring.contour[i * ring.vertexStride + 1];
+                            const nextX = ring.contour[nextIdx * ring.vertexStride];
+                            const nextY = ring.contour[nextIdx * ring.vertexStride + 1];
+
+                            const isOutline = !(
+                                (currX <= 0 && nextX <= 0) ||
+                                (currX >= ring.extents && nextX >= ring.extents) ||
+                                (currY <= 0 && nextY <= 0) ||
+                                (currY >= ring.extents && nextY >= ring.extents)
+                            );
+
+                            if (!isOutline && line.length !== 0) {
+                                lines.push(line);
+                                line = [];
+                            } else if (isOutline && line.length === 0) {
+                                webMercatorTile2TargetTile(
+                                    extents,
+                                    this.m_decodeInfo,
+                                    tmpV2.set(currX, currY),
+                                    tmpV3
+                                );
+                                line.push(tmpV3.x, tmpV3.y, tmpV3.z);
+
+                                if (needIndividualLineSegments) {
+                                    // Add next point as the end point of this line segment.
+                                    webMercatorTile2TargetTile(
+                                        extents,
+                                        this.m_decodeInfo,
+                                        tmpV2.set(nextX, nextY),
+                                        tmpV4
+                                    );
+                                    line.push(tmpV4.x, tmpV4.y, tmpV4.z);
+
+                                    segmentOffsets!.push(lastSegmentOffset);
+
+                                    // Compute length of segment and whole line to scale down later.
+                                    const segmentLength = tmpV3.distanceTo(tmpV4);
+                                    ringLength += segmentLength;
+                                    lastSegmentOffset += segmentLength;
+                                    segmentOffsets!.push(lastSegmentOffset);
+                                }
+                            }
+                            if (isOutline && !needIndividualLineSegments) {
+                                webMercatorTile2TargetTile(
+                                    extents,
+                                    this.m_decodeInfo,
+                                    tmpV2.set(nextX, nextY),
+                                    tmpV3
+                                );
+                                line.push(tmpV3.x, tmpV3.y, tmpV3.z);
+                            }
+
+                            if (needIndividualLineSegments && line.length > 0 && ringLength > 0) {
+                                // Scale down each individual segment to range [0..1] for the whole
+                                // line.
+                                segmentOffsets!.forEach((offs, index) => {
+                                    segmentOffsets![index] = offs / ringLength;
+                                });
+
+                                // Close the line segment as a single line.
+                                lines.push(line);
+                                offsets!.push(segmentOffsets!);
+                            }
                         }
-                        this.applyLineTechnique(
-                            lineGeometry,
-                            technique,
-                            techniqueIndex,
-                            this.m_gatherFeatureIds,
-                            lineType,
-                            featureId,
-                            lines,
-                            env
-                        );
+
+                        if (!needIndividualLineSegments && line.length > 0) {
+                            lines.push(line);
+                        }
                     });
+
+                    if (lines.length === 0) {
+                        return;
+                    }
+
+                    this.applyLineTechnique(
+                        lineGeometry,
+                        technique,
+                        techniqueIndex,
+                        lineType,
+                        env.entries,
+                        lines,
+                        context,
+                        undefined,
+                        offsets!
+                    );
                 });
             }
         });
@@ -680,10 +934,9 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         this.createGeometries();
         this.processSimpleLines(this.m_simpleLines);
         this.processLines(this.m_solidLines);
-        this.processLines(this.m_dashedLines);
 
         const decodedTile: DecodedTile = {
-            techniques: this.m_styleSetEvaluator.techniques,
+            techniques: this.m_styleSetEvaluator.decodedTechniques,
             geometries: this.m_geometries,
             decodeTime: undefined
         };
@@ -696,33 +949,190 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         if (this.m_textPathGeometries.length > 0) {
             decodedTile.textPathGeometries = this.m_textPathGeometries;
         }
+        if (this.m_pathGeometries.length > 0) {
+            decodedTile.pathGeometries = this.m_pathGeometries;
+        }
         if (this.m_sources.length !== 0) {
             decodedTile.copyrightHolderIds = this.m_sources;
         }
+        decodedTile.maxGeometryHeight = this.m_maxGeometryHeight;
         return decodedTile;
+    }
+
+    /**
+     * Split the lines array into multiple parts if there are sharp corners. Reject parts that are
+     * too short to display the label text.
+     *
+     * @param {number[][]} lines Array containing the points of the paths.
+     * @param {number} minEstimatedLabelLengthSqr Minimum label size squared.
+     * @param {number} maxCornerAngle Maximum angle between consecutive path segments in radians.
+     * @returns The split and filtered lines array.
+     */
+    protected splitJaggyLines(
+        lines: number[][],
+        minEstimatedLabelLengthSqr: number,
+        maxCornerAngle: number
+    ): number[][] {
+        const validLines: number[][] = [];
+
+        const computeBoundingBoxSizeSqr = (
+            aLine: number[],
+            startIndex: number,
+            endIndex: number
+        ): number => {
+            let minX = Number.MAX_SAFE_INTEGER;
+            let maxX = Number.MIN_SAFE_INTEGER;
+            let minY = Number.MAX_SAFE_INTEGER;
+            let maxY = Number.MIN_SAFE_INTEGER;
+            for (let i = startIndex; i < endIndex; i += 3) {
+                const x = aLine[i];
+                const y = aLine[i + 1];
+                if (x < minX) {
+                    minX = x;
+                }
+                if (x > maxX) {
+                    maxX = x;
+                }
+                if (y < minY) {
+                    minY = y;
+                }
+                if (y > maxY) {
+                    maxY = y;
+                }
+            }
+
+            return (maxX - minX) * (maxX - minX) + (maxY - minY) * (maxY - minY);
+        };
+
+        // Work on a copy of the path.
+        const pathsToCheck = lines.slice();
+
+        while (pathsToCheck.length > 0) {
+            const path = pathsToCheck.pop();
+
+            if (path === undefined || path.length < 6) {
+                continue;
+            }
+
+            let splitIndex = -1;
+
+            for (let i = 0; i < path.length - 3; i += 3) {
+                tempP0.set(path[i], path[i + 1]);
+                tempP1.set(path[i + 3], path[i + 4]);
+                const tangent = tempP1.sub(tempP0).normalize();
+
+                if (i > 0) {
+                    const theta = Math.atan2(
+                        tempPreviousTangent.x * tangent.y - tangent.x * tempPreviousTangent.y,
+                        tangent.dot(tempPreviousTangent)
+                    );
+
+                    if (Math.abs(theta) > maxCornerAngle) {
+                        splitIndex = i;
+                        break;
+                    }
+                }
+                tempPreviousTangent.set(tangent.x, tangent.y);
+            }
+
+            if (splitIndex > 0) {
+                // Estimate if the first part of the path is long enough for the label.
+                const firstPathLengthSqr = computeBoundingBoxSizeSqr(path, 0, splitIndex + 3);
+                // Estimate if the second part of the path is long enough for the label.
+                const secondPathLengthSqr = computeBoundingBoxSizeSqr(
+                    path,
+                    splitIndex,
+                    path.length
+                );
+
+                if (firstPathLengthSqr > minEstimatedLabelLengthSqr) {
+                    // Split off the valid first path points with a clone of the path.
+                    validLines.push(path.slice(0, splitIndex + 3));
+                }
+
+                if (secondPathLengthSqr > minEstimatedLabelLengthSqr) {
+                    // Now process the second part of the path, it may have to be split
+                    // again.
+                    pathsToCheck.push(path.slice(splitIndex));
+                }
+            } else {
+                // Estimate if the path is long enough for the label, otherwise ignore
+                // it for rendering text. First, compute the bounding box in world
+                // coordinates.
+                const pathLengthSqr = computeBoundingBoxSizeSqr(path, 0, path.length);
+
+                if (pathLengthSqr > minEstimatedLabelLengthSqr) {
+                    validLines.push(path);
+                }
+            }
+        }
+
+        return validLines;
+    }
+
+    private getTextureCoordinateType(technique: Technique): TextureCoordinateType | undefined {
+        // Set TileSpace coordinate type to generate texture coordinates for the displacement map
+        // used in elevation overlay.
+        if (
+            (isFillTechnique(technique) ||
+                isSolidLineTechnique(technique) ||
+                isExtrudedPolygonTechnique(technique)) &&
+            this.m_enableElevationOverlay
+        ) {
+            return TextureCoordinateType.TileSpace;
+        }
+
+        return textureCoordinateType(technique);
+    }
+
+    private getComputeTexCoordsFunc(technique: Technique): TexCoordsFunction | undefined {
+        const texCoordType = this.getTextureCoordinateType(technique);
+
+        return texCoordType === TextureCoordinateType.TileSpace
+            ? (tilePos: THREE.Vector2, tileExtents: number) => {
+                  const { x: u, y: v } = new THREE.Vector2()
+                      .copy(tilePos)
+                      .divideScalar(tileExtents);
+                  return { u, v: 1 - v };
+              }
+            : texCoordType === TextureCoordinateType.EquirectangularSpace
+            ? (tilePos: THREE.Vector2, extents: number) => {
+                  const worldPos = tile2world(extents, this.m_decodeInfo, tilePos, false, tmpV2r);
+                  const { x: u, y: v } = normalizedEquirectangularProjection.reprojectPoint(
+                      webMercatorProjection,
+                      new THREE.Vector3(worldPos.x, worldPos.y, 0)
+                  );
+                  return { u, v };
+              }
+            : undefined;
     }
 
     private applyLineTechnique(
         linesGeometry: LinesGeometry[],
-        technique: Technique,
+        technique: IndexedTechnique,
         techniqueIndex: number,
-        gatherFeatureIds: boolean,
         lineType = LineType.Complex,
-        featureId: number | undefined,
+        featureAttributes: AttributeMap,
         lines: number[][],
-        env: MapEnv
+        context: AttrEvaluationContext,
+        uvs?: number[][],
+        offsets?: number[][]
     ): void {
-        const renderOrderOffset = technique.renderOrderBiasProperty
-            ? env.lookup(technique.renderOrderBiasProperty)
-            : 0;
+        const renderOrderOffset = evaluateTechniqueAttr<number>(
+            context,
+            technique.renderOrderOffset,
+            0
+        );
+
         let lineGroup: LineGroup;
         const lineGroupGeometries = linesGeometry.find(aLine => {
             return (
                 aLine.technique === techniqueIndex && aLine.renderOrderOffset === renderOrderOffset
             );
         });
+        const hasNormalsAndUvs = uvs !== undefined;
         if (lineGroupGeometries === undefined) {
-            lineGroup = new LineGroup(undefined, lineType === LineType.Simple);
+            lineGroup = new LineGroup(hasNormalsAndUvs, undefined, lineType === LineType.Simple);
             const aLine: LinesGeometry = {
                 type: lineType === LineType.Complex ? GeometryType.SolidLine : GeometryType.Line,
                 technique: techniqueIndex,
@@ -731,10 +1141,15 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 lines: lineGroup
             };
 
-            if (gatherFeatureIds) {
+            const techniqueTransient = evaluateTechniqueAttr<boolean>(
+                context,
+                technique.transient,
+                false
+            );
+            if (!techniqueTransient && this.m_gatherFeatureAttributes) {
                 // if this technique is transient, do not save the featureIds with the geometry
-                aLine.featureIds = technique.transient === true ? undefined : [featureId];
-                aLine.featureStarts = technique.transient === true ? undefined : [0];
+                aLine.objInfos = [featureAttributes];
+                aLine.featureStarts = [0];
             }
 
             linesGeometry.push(aLine);
@@ -742,18 +1157,26 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
             lineGroup = lineGroupGeometries.lines;
 
             if (
-                gatherFeatureIds &&
-                lineGroupGeometries.featureIds &&
+                this.m_gatherFeatureAttributes &&
+                lineGroupGeometries.objInfos &&
                 lineGroupGeometries.featureStarts
             ) {
                 // Add ID to tag the geometry, also provide the current length of the index
                 // attribute
-                lineGroupGeometries.featureIds.push(featureId);
+                lineGroupGeometries.objInfos.push(featureAttributes);
                 lineGroupGeometries.featureStarts.push(lineGroup.indices.length);
             }
         }
+        let i = 0;
         lines.forEach(aLine => {
-            lineGroup.add(this.m_decodeInfo.center, aLine);
+            lineGroup.add(
+                this.m_decodeInfo.center,
+                aLine,
+                this.projection,
+                offsets ? offsets[i] : undefined,
+                uvs ? uvs[i] : undefined
+            );
+            i++;
         });
     }
 
@@ -762,7 +1185,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         technique: Technique,
         techniqueIndex: number,
         featureId: number | undefined,
-        env: MapEnv
+        context: AttrEvaluationContext,
+        extents: number
     ): void {
         const isExtruded = isExtrudedPolygonTechnique(technique);
 
@@ -774,27 +1198,53 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         }
 
         const extrudedPolygonTechnique = technique as ExtrudedPolygonTechnique;
+        const fillTechnique = technique as FillTechnique;
+        const boundaryWalls = extrudedPolygonTechnique.boundaryWalls !== false;
 
         const isFilled = isFillTechnique(technique);
-        const texCoordType = textureCoordinateType(technique);
+        const texCoordType = this.getTextureCoordinateType(technique);
 
-        // Get the height values for the footprint and extrusion.
-        const currentHeight = env.lookup("height") as number;
-        const currentMinHeight = env.lookup("min_height") as number;
-        const defaultHeight = extrudedPolygonTechnique.defaultHeight;
-        const constantHeight = extrudedPolygonTechnique.constantHeight;
-        const minHeight = currentMinHeight !== undefined && !isFilled ? currentMinHeight : 0;
-        const height =
-            currentHeight !== undefined
-                ? currentHeight
-                : defaultHeight !== undefined
-                ? defaultHeight
-                : 0;
+        let height = evaluateTechniqueAttr<number>(context, extrudedPolygonTechnique.height);
+
+        let floorHeight = evaluateTechniqueAttr<number>(
+            context,
+            extrudedPolygonTechnique.floorHeight
+        );
+
+        if (height === undefined) {
+            // Get the height values for the footprint and extrusion.
+            const featureHeight = context.env.lookup("height") as number;
+            const styleSetDefaultHeight = evaluateTechniqueAttr<number>(
+                context,
+                extrudedPolygonTechnique.defaultHeight
+            );
+            height =
+                featureHeight !== undefined
+                    ? featureHeight
+                    : styleSetDefaultHeight !== undefined
+                    ? styleSetDefaultHeight
+                    : 0;
+        }
+
+        if (floorHeight === undefined) {
+            const featureMinHeight = context.env.lookup("min_height") as number;
+            floorHeight = featureMinHeight !== undefined && !isFilled ? featureMinHeight : 0;
+        }
+
+        // Prevent that extruded buildings are completely flat (can introduce errors in normal
+        // computation and extrusion).
+        height = Math.max(floorHeight + ExtrusionFeatureDefs.MIN_BUILDING_HEIGHT, height);
+
+        const styleSetConstantHeight = getOptionValue(
+            extrudedPolygonTechnique.constantHeight,
+            false
+        );
 
         this.m_decodeInfo.tileBounds.getCenter(tempTileOrigin);
 
         const {
             positions,
+            normals,
             textureCoordinates,
             colors,
             extrusionAxis,
@@ -803,199 +1253,270 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
             groups
         } = meshBuffers;
 
-        const stride = texCoordType !== undefined ? 5 : 3;
+        const featureStride = texCoordType !== undefined ? 4 : 2;
+        const vertexStride = featureStride + 2;
         const isSpherical = this.m_decodeInfo.targetProjection.type === ProjectionType.Spherical;
 
-        for (const rings of polygons) {
-            const start = indices.length;
-            const basePosition = positions.length;
+        const edgeWidth = isExtruded
+            ? extrudedPolygonTechnique.lineWidth || 0.0
+            : isFilled
+            ? fillTechnique.lineWidth || 0.0
+            : 0.0;
+        const hasEdges = edgeWidth > 0.0;
 
-            for (let ringIndex = 0; ringIndex < rings.length; ) {
-                const baseVertex = positions.length / 3;
-
-                // Get the contour vertices for this ring.
-                const ring = rings[ringIndex++];
-
-                const vertices: number[] = [...ring.contour];
-                const points: number[] = [...ring.points];
-
-                if (isExtruded) {
-                    addExtrudedWalls(
-                        indices,
-                        baseVertex,
-                        stride,
-                        ring.contour,
-                        ring.contourOutlines,
-                        extrudedPolygonTechnique.boundaryWalls
-                    );
-                }
-                if (ring.contourOutlines !== undefined) {
-                    addPolygonEdges(
-                        edgeIndices,
-                        baseVertex,
-                        stride,
-                        ring.contour,
-                        ring.contourOutlines,
-                        isExtruded,
-                        extrudedPolygonTechnique.footprint,
-                        extrudedPolygonTechnique.maxSlope
-                    );
-                }
-
-                // Repeat the process for all the inner rings (holes).
-                const outerRingWinding = ring.winding;
-                const holes: number[] = [];
-
-                // Iterate over the inner rings. The inner rings have the oppositve winding
-                // of the outer rings.
-                while (ringIndex < rings.length && rings[ringIndex].winding !== outerRingWinding) {
-                    const current = rings[ringIndex++];
-                    holes.push(vertices.length / stride);
-
-                    // As we are predicting the indexes before the vertices are added,
-                    // the vertex offset has to be taken into account
-                    const vertexOffset = (vertices.length / stride) * 2;
-                    vertices.push(...current.contour);
-                    points.push(...current.points);
-
-                    if (isExtruded) {
-                        addExtrudedWalls(
-                            indices,
-                            vertexOffset + baseVertex,
-                            stride,
-                            current.contour,
-                            current.contourOutlines,
-                            extrudedPolygonTechnique.boundaryWalls
-                        );
+        let color: THREE.Color | undefined;
+        if (isExtrudedPolygonTechnique(technique)) {
+            if (getOptionValue(technique.vertexColors, false)) {
+                let colorValue = evaluateTechniqueAttr<StyleColor>(context, technique.color);
+                if (colorValue === undefined) {
+                    const featureColor = context.env.lookup("color");
+                    if (this.isColorStringValid(featureColor)) {
+                        colorValue = String(featureColor);
                     }
-                    if (current.contourOutlines !== undefined) {
-                        addPolygonEdges(
-                            edgeIndices,
-                            (isExtruded ? vertexOffset : vertexOffset / 2) + baseVertex,
-                            stride,
-                            current.contour,
-                            current.contourOutlines,
-                            isExtruded,
-                            extrudedPolygonTechnique.footprint,
-                            extrudedPolygonTechnique.maxSlope
+                }
+                if (colorValue === undefined) {
+                    colorValue = evaluateTechniqueAttr<number | string>(
+                        context,
+                        technique.defaultColor,
+                        0x000000
+                    );
+                }
+
+                if (colorValue === undefined) {
+                    colorValue = 0x000000;
+                }
+                tmpColor.set(colorValue as any);
+
+                color = tmpColor;
+            }
+        }
+
+        for (const polygon of polygons) {
+            const startIndexCount = indices.length;
+
+            for (let ringIndex = 0; ringIndex < polygon.length; ) {
+                const vertices: number[] = [];
+                const polygonBaseVertex = positions.length / 3;
+
+                const { contour, winding } = polygon[ringIndex++];
+                for (let i = 0; i < contour.length / featureStride; ++i) {
+                    // Invert the Y component to preserve the correct winding without transforming
+                    // from webMercator's local to global space.
+                    for (let j = 0; j < featureStride; ++j) {
+                        vertices.push((j === 1 ? -1 : 1) * contour[i * featureStride + j]);
+                    }
+
+                    // Calculate nextEdge and nextWall.
+                    const nextIdx = (i + 1) % (contour.length / featureStride);
+                    const currX = contour[i * featureStride];
+                    const currY = contour[i * featureStride + 1];
+                    const nextX = contour[nextIdx * featureStride];
+                    const nextY = contour[nextIdx * featureStride + 1];
+                    const insideExtents = !(
+                        (currX <= 0 && nextX <= 0) ||
+                        (currX >= extents && nextX >= extents) ||
+                        (currY <= 0 && nextY <= 0) ||
+                        (currY >= extents && nextY >= extents)
+                    );
+
+                    vertices.push(
+                        insideExtents ? nextIdx : -1,
+                        boundaryWalls || insideExtents ? nextIdx : -1
+                    );
+                }
+
+                // Iterate over the inner rings. The inner rings have the opposite winding
+                // of the outer rings.
+                const holes: number[] = [];
+                while (ringIndex < polygon.length && polygon[ringIndex].winding !== winding) {
+                    const vertexOffset = vertices.length / vertexStride;
+                    holes.push(vertexOffset);
+
+                    const hole = polygon[ringIndex++].contour;
+                    for (let i = 0; i < hole.length / featureStride; ++i) {
+                        // Invert the Y component to preserve the correct winding without
+                        // transforming from webMercator's local to global space.
+                        for (let j = 0; j < featureStride; ++j) {
+                            vertices.push((j === 1 ? -1 : 1) * hole[i * featureStride + j]);
+                        }
+
+                        // Calculate nextEdge and nextWall.
+                        const nextIdx = (i + 1) % (hole.length / featureStride);
+                        const currX = hole[i * featureStride];
+                        const currY = hole[i * featureStride + 1];
+                        const nextX = hole[nextIdx * featureStride];
+                        const nextY = hole[nextIdx * featureStride + 1];
+                        const insideExtents = !(
+                            (currX <= 0 && nextX <= 0) ||
+                            (currX >= extents && nextX >= extents) ||
+                            (currY <= 0 && nextY <= 0) ||
+                            (currY >= extents && nextY >= extents)
+                        );
+
+                        vertices.push(
+                            insideExtents ? vertexOffset + nextIdx : -1,
+                            boundaryWalls || insideExtents ? vertexOffset + nextIdx : -1
                         );
                     }
                 }
 
                 try {
                     // Triangulate the footprint polyline.
-                    // For sphere projection the stride of Ring.contour and Ring.points can be
-                    // different b/c Ring.contour contains texture coordinates where Ring.points
-                    // does not.
-                    const triangles = earcut(points, holes, stride);
+                    const triangles = earcut(vertices, holes, vertexStride);
+                    const originalVertexCount = vertices.length / vertexStride;
 
+                    // Subdivide for spherical projections if needed.
                     if (isSpherical) {
-                        const geom = new THREE.Geometry();
+                        const geom = new THREE.BufferGeometry();
 
-                        for (let i = 0; i < vertices.length; i += stride) {
-                            geom.vertices.push(
-                                new THREE.Vector3(points[i], points[i + 1], points[i + 2])
+                        const positionArray = [];
+                        const uvArray = [];
+                        const edgeArray = [];
+                        const wallArray = [];
+
+                        // Transform to global webMercator coordinates to be able to reproject to
+                        // sphere.
+                        for (let i = 0; i < vertices.length; i += vertexStride) {
+                            const worldPos = tile2world(
+                                extents,
+                                this.m_decodeInfo,
+                                tmpV2.set(vertices[i], vertices[i + 1]),
+                                true,
+                                tmpV2r
                             );
-                        }
-                        for (let i = 0; i < triangles.length; i += 3) {
-                            geom.faces.push(
-                                new THREE.Face3(triangles[i], triangles[i + 1], triangles[i + 2])
-                            );
+                            positionArray.push(worldPos.x, worldPos.y, 0);
                             if (texCoordType !== undefined) {
-                                const i0 = triangles[i] * stride;
-                                const i1 = triangles[i + 1] * stride;
-                                const i2 = triangles[i + 2] * stride;
-                                geom.faceVertexUvs[0][i / 3] = [
-                                    new THREE.Vector2(points[i0 + 3], points[i0 + 4]),
-                                    new THREE.Vector2(points[i1 + 3], points[i1 + 4]),
-                                    new THREE.Vector2(points[i2 + 3], points[i2 + 4])
-                                ];
+                                uvArray.push(vertices[i + 2], vertices[i + 3]);
                             }
+                            edgeArray.push(vertices[i + featureStride]);
+                            wallArray.push(vertices[i + featureStride + 1]);
                         }
 
-                        // FIXME(HARP-5700): Subdivison modifer ignores texture coordinates.
+                        // Create the temporary geometry used for subdivision.
+                        const posAttr = new THREE.BufferAttribute(
+                            new Float32Array(positionArray),
+                            3
+                        );
+                        geom.setAttribute("position", posAttr);
+                        let uvAttr: THREE.BufferAttribute | undefined;
+                        if (texCoordType !== undefined) {
+                            uvAttr = new THREE.BufferAttribute(new Float32Array(uvArray), 2);
+                            geom.setAttribute("uv", uvAttr);
+                        }
+                        const edgeAttr = new THREE.BufferAttribute(new Float32Array(edgeArray), 1);
+                        geom.setAttribute("edge", edgeAttr);
+                        const wallAttr = new THREE.BufferAttribute(new Float32Array(wallArray), 1);
+                        geom.setAttribute("wall", edgeAttr);
+                        const indexAttr = new THREE.BufferAttribute(new Uint32Array(triangles), 1);
+                        geom.setIndex(indexAttr);
+
+                        // FIXME(HARP-5700): Subdivision modifier ignores texture coordinates.
                         const modifier = new SphericalGeometrySubdivisionModifier(
                             THREE.Math.degToRad(10),
-                            mercatorProjection
+                            webMercatorProjection
                         );
-
                         modifier.modify(geom);
 
+                        // Reassemble the vertex buffer, transforming the subdivided global
+                        // webMercator points back to local space.
                         vertices.length = 0;
                         triangles.length = 0;
-
-                        geom.vertices.forEach(p => {
-                            this.projection.reprojectPoint(mercatorProjection, p, p);
-                            p.sub(this.m_decodeInfo.center);
-                            vertices.push(p.x, p.y, p.z);
+                        for (let i = 0; i < posAttr.array.length; i += 3) {
+                            const tilePos = world2tile(
+                                extents,
+                                this.m_decodeInfo,
+                                tmpV2.set(posAttr.array[i], posAttr.array[i + 1]),
+                                true,
+                                tmpV2r
+                            );
+                            vertices.push(tilePos.x, tilePos.y);
                             if (texCoordType !== undefined) {
-                                vertices.push(0, 0);
+                                vertices.push(uvAttr!.array[(i / 3) * 2]);
+                                vertices.push(uvAttr!.array[(i / 3) * 2 + 1]);
                             }
-                        });
+                            vertices.push(edgeAttr.array[i / 3]);
+                            vertices.push(wallAttr.array[i / 3]);
+                        }
 
-                        geom.faces.forEach((face, i) => {
-                            const { a, b, c } = face;
-                            triangles.push(a, b, c);
-                            if (texCoordType !== undefined) {
-                                const vertexUvs = geom.faceVertexUvs[0][i];
-                                if (vertexUvs !== undefined) {
-                                    vertexUvs[0].toArray(vertices, a * stride + 3);
-                                    vertexUvs[1].toArray(vertices, b * stride + 3);
-                                    vertexUvs[2].toArray(vertices, c * stride + 3);
-                                }
-                            }
-                        });
+                        const geomIndex = geom.getIndex();
+                        if (geomIndex !== null) {
+                            triangles.push(...(geomIndex.array as Float32Array));
+                        }
                     }
 
                     // Add the footprint/roof vertices to the position buffer.
                     tempVertNormal.set(0, 0, 1);
-                    for (let i = 0; i < vertices.length; i += stride) {
+
+                    // Assemble the vertex buffer.
+                    for (let i = 0; i < vertices.length; i += vertexStride) {
+                        webMercatorTile2TargetTile(
+                            extents,
+                            this.m_decodeInfo,
+                            tmpV2.set(vertices[i], vertices[i + 1]),
+                            tmpV3,
+                            true
+                        );
+
                         let scaleFactor = 1.0;
-                        if (isExtruded && constantHeight !== true) {
+                        if (isExtruded && styleSetConstantHeight !== true) {
                             tempVertOrigin.set(
-                                tempTileOrigin.x + vertices[i],
-                                tempTileOrigin.y + vertices[i + 1],
-                                tempTileOrigin.z + vertices[i + 2]
+                                tempTileOrigin.x + tmpV3.x,
+                                tempTileOrigin.y + tmpV3.y,
+                                tempTileOrigin.z + tmpV3.z
                             );
                             scaleFactor = this.m_decodeInfo.targetProjection.getScaleFactor(
                                 tempVertOrigin
                             );
                         }
+                        this.m_maxGeometryHeight = Math.max(
+                            this.m_maxGeometryHeight,
+                            scaleFactor * height
+                        );
 
                         if (isSpherical) {
                             tempVertNormal
-                                .set(vertices[i], vertices[i + 1], vertices[i + 2])
+                                .set(tmpV3.x, tmpV3.y, tmpV3.z)
                                 .add(this.center)
                                 .normalize();
                         }
 
-                        tempFootDisp.copy(tempVertNormal).multiplyScalar(minHeight * scaleFactor);
+                        tempFootDisp.copy(tempVertNormal).multiplyScalar(floorHeight * scaleFactor);
                         tempRoofDisp.copy(tempVertNormal).multiplyScalar(height * scaleFactor);
                         positions.push(
-                            vertices[i] + tempFootDisp.x,
-                            vertices[i + 1] + tempFootDisp.y,
-                            vertices[i + 2] + tempFootDisp.z
+                            tmpV3.x + tempFootDisp.x,
+                            tmpV3.y + tempFootDisp.y,
+                            tmpV3.z + tempFootDisp.z
                         );
                         if (texCoordType !== undefined) {
-                            textureCoordinates.push(vertices[i + 3], vertices[i + 4]);
+                            textureCoordinates.push(vertices[i + 2], vertices[i + 3]);
                         }
-
+                        if (this.m_enableElevationOverlay) {
+                            normals.push(...tempVertNormal.toArray());
+                        }
                         if (isExtruded) {
                             positions.push(
-                                vertices[i] + tempRoofDisp.x,
-                                vertices[i + 1] + tempRoofDisp.y,
-                                vertices[i + 2] + tempRoofDisp.z
+                                tmpV3.x + tempRoofDisp.x,
+                                tmpV3.y + tempRoofDisp.y,
+                                tmpV3.z + tempRoofDisp.z
                             );
                             extrusionAxis.push(
-                                0,
-                                0,
-                                0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
                                 tempRoofDisp.x - tempFootDisp.x,
                                 tempRoofDisp.y - tempFootDisp.y,
-                                tempRoofDisp.z - tempFootDisp.z
+                                tempRoofDisp.z - tempFootDisp.z,
+                                1.0
                             );
                             if (texCoordType !== undefined) {
-                                textureCoordinates.push(vertices[i + 3], vertices[i + 4]);
+                                textureCoordinates.push(vertices[i + 2], vertices[i + 3]);
+                            }
+                            if (this.m_enableElevationOverlay) {
+                                normals.push(...tempVertNormal.toArray());
+                            }
+                            if (color !== undefined) {
+                                colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
                             }
                         }
                     }
@@ -1005,43 +1526,57 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                         if (isExtruded) {
                             // When extruding we duplicate the vertices, so that all even vertices
                             // belong to the bottom and all odd vertices belong to the top.
-                            const i0 = baseVertex + triangles[i + 0] * 2 + 1;
-                            const i1 = baseVertex + triangles[i + 1] * 2 + 1;
-                            const i2 = baseVertex + triangles[i + 2] * 2 + 1;
+                            const i0 = polygonBaseVertex + triangles[i + 0] * 2 + 1;
+                            const i1 = polygonBaseVertex + triangles[i + 1] * 2 + 1;
+                            const i2 = polygonBaseVertex + triangles[i + 2] * 2 + 1;
                             indices.push(i0, i1, i2);
                         } else {
-                            const i0 = baseVertex + triangles[i + 0];
-                            const i1 = baseVertex + triangles[i + 1];
-                            const i2 = baseVertex + triangles[i + 2];
+                            const i0 = polygonBaseVertex + triangles[i + 0];
+                            const i1 = polygonBaseVertex + triangles[i + 1];
+                            const i2 = polygonBaseVertex + triangles[i + 2];
                             indices.push(i0, i1, i2);
                         }
+                    }
+
+                    // Assemble the index buffer for edges (follow vertices as linked list).
+                    if (hasEdges) {
+                        this.addEdges(
+                            polygonBaseVertex,
+                            originalVertexCount,
+                            vertexStride,
+                            featureStride,
+                            positions,
+                            vertices,
+                            edgeIndices,
+                            isExtruded,
+                            extrudedPolygonTechnique.footprint,
+                            extrudedPolygonTechnique.maxSlope
+                        );
+                    }
+                    if (isExtruded) {
+                        this.addWalls(
+                            polygonBaseVertex,
+                            originalVertexCount,
+                            vertexStride,
+                            featureStride,
+                            vertices,
+                            indices
+                        );
                     }
                 } catch (err) {
                     logger.error(`cannot triangulate geometry`, err);
                 }
             }
 
-            if (isExtrudedPolygonTechnique(technique) && technique.vertexColors === true) {
-                const positionCount = (positions.length - basePosition) / 3;
-                const color = new THREE.Color(
-                    technique.color !== undefined
-                        ? getPropertyValue(technique.color, this.m_decodeInfo.tileKey.level)
-                        : this.isColorStringValid(env.lookup("color") as string)
-                        ? (env.lookup("color") as string)
-                        : technique.defaultColor !== undefined
-                        ? getPropertyValue(technique.defaultColor, this.m_decodeInfo.tileKey.level)
-                        : 0x000000
-                );
-
-                for (let i = 0; i < positionCount; ++i) {
-                    colors.push(color.r, color.g, color.b);
-                }
+            if (this.m_gatherFeatureAttributes) {
+                meshBuffers.objInfos.push(context.env.entries);
+                meshBuffers.featureStarts.push(startIndexCount);
             }
 
-            const count = indices.length - start;
+            const count = indices.length - startIndexCount;
             if (count > 0) {
                 groups.push({
-                    start,
+                    start: startIndexCount,
                     count,
                     technique: techniqueIndex,
                     featureId
@@ -1050,7 +1585,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         }
     }
 
-    private createGeometries(): any {
+    private createGeometries() {
         this.m_meshBuffers.forEach((meshBuffers, techniqueIdx) => {
             if (meshBuffers.positions.length === 0) {
                 return;
@@ -1080,8 +1615,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                     },
                     texts: meshBuffers.texts,
                     technique: techniqueIdx,
-                    featureId: meshBuffers.featureIds ? meshBuffers.featureIds[0] : undefined,
-                    stringCatalog: meshBuffers.stringCatalog
+                    stringCatalog: meshBuffers.stringCatalog,
+                    objInfos: meshBuffers.objInfos
                 });
                 return;
             }
@@ -1096,9 +1631,9 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                     },
                     texts: meshBuffers.texts,
                     technique: techniqueIdx,
-                    featureId: meshBuffers.featureIds ? meshBuffers.featureIds[0] : undefined,
                     stringCatalog: meshBuffers.stringCatalog,
-                    imageTextures: meshBuffers.imageTextures
+                    imageTextures: meshBuffers.imageTextures,
+                    objInfos: meshBuffers.objInfos
                 });
                 return;
             }
@@ -1125,6 +1660,22 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 ],
                 groups: meshBuffers.groups
             };
+
+            if (meshBuffers.normals.length > 0) {
+                const normals = new Float32Array(meshBuffers.normals);
+                assert(
+                    normals.length === positionElements.length,
+                    "length of normals buffer is different than the length of the " +
+                        "position buffer"
+                );
+
+                geometry.vertexAttributes.push({
+                    name: "normal",
+                    buffer: normals.buffer as ArrayBuffer,
+                    itemCount: 3,
+                    type: "float"
+                });
+            }
 
             if (meshBuffers.colors.length > 0) {
                 const colors = new Float32Array(meshBuffers.colors);
@@ -1163,7 +1714,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
             if (meshBuffers.extrusionAxis.length > 0) {
                 const extrusionAxis = new Float32Array(meshBuffers.extrusionAxis);
                 assert(
-                    extrusionAxis.length === positionElements.length,
+                    extrusionAxis.length / 4 === positionElements.length / 3,
                     "length of extrusionAxis buffer is different than the length of the " +
                         "position buffer"
                 );
@@ -1171,7 +1722,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 geometry.vertexAttributes.push({
                     name: "extrusionAxis",
                     buffer: extrusionAxis.buffer as ArrayBuffer,
-                    itemCount: 3,
+                    itemCount: 4,
                     type: "float"
                 });
             }
@@ -1197,10 +1748,8 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 };
             }
 
-            if (this.m_gatherFeatureIds) {
-                geometry.featureIds = meshBuffers.featureIds;
-                geometry.featureStarts = meshBuffers.featureStarts;
-            }
+            geometry.featureStarts = meshBuffers.featureStarts;
+            geometry.objInfos = meshBuffers.objInfos;
 
             this.m_geometries.push(geometry);
         });
@@ -1229,13 +1778,10 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                 },
                 interleavedVertexAttributes: [attr],
                 groups: [{ start: 0, count: indices.length, technique, renderOrderOffset }],
-                vertexAttributes: []
+                vertexAttributes: [],
+                featureStarts: linesGeometry.featureStarts,
+                objInfos: linesGeometry.objInfos
             };
-
-            if (this.m_gatherFeatureIds) {
-                geometry.featureIds = linesGeometry.featureIds;
-                geometry.featureStarts = linesGeometry.featureStarts;
-            }
 
             this.m_geometries.push(geometry);
         });
@@ -1263,13 +1809,11 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
                     name: "index"
                 },
                 vertexAttributes: [attr],
-                groups: [{ start: 0, count: indices.length, technique, renderOrderOffset }]
+                groups: [{ start: 0, count: indices.length, technique, renderOrderOffset }],
+                featureStarts: linesGeometry.featureStarts,
+                objInfos: linesGeometry.objInfos
             };
 
-            if (this.m_gatherFeatureIds) {
-                geometry.featureIds = linesGeometry.featureIds;
-                geometry.featureStarts = linesGeometry.featureStarts;
-            }
             this.m_geometries.push(geometry);
         });
     }
@@ -1290,7 +1834,7 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         return buffers;
     }
 
-    private processFeatureCommon(env: MapEnv) {
+    private processFeatureCommon(env: Env) {
         const source = env.lookup("source");
         if (typeof source === "string" && source !== "") {
             if (!this.m_sources.includes(source)) {
@@ -1299,7 +1843,165 @@ export class OmvDecodedTileEmitter implements IOmvEmitter {
         }
     }
 
-    private isColorStringValid(color: Value): boolean {
+    private isColorStringValid(color: Value | undefined): color is string {
         return typeof color === "string" && color.length > 0;
+    }
+
+    private addEdges(
+        featureBaseVertex: number,
+        featureVertexCount: number,
+        vertexStride: number,
+        featureStride: number,
+        positions: number[],
+        vertices: number[],
+        indices: number[],
+        isExtruded: boolean,
+        hasFootprint?: boolean,
+        maxSlope?: number
+    ) {
+        const tmpEdgeA = new THREE.Vector3();
+        const tmpEdgeB = new THREE.Vector3();
+        let firstRingVertex: number | undefined;
+        let prevRingVertex: number | undefined;
+        let currRingVertex = 0;
+        let maxRingVertex = 0;
+
+        while (currRingVertex < featureVertexCount) {
+            while (currRingVertex !== firstRingVertex) {
+                if (firstRingVertex === undefined) {
+                    firstRingVertex = currRingVertex;
+                }
+                if (currRingVertex < featureVertexCount) {
+                    maxRingVertex = Math.max(maxRingVertex, currRingVertex);
+                }
+
+                const nextRingVertex = vertices[currRingVertex * vertexStride + featureStride];
+                if (nextRingVertex < 0) {
+                    break;
+                } else {
+                    if (!isExtruded) {
+                        indices.push(
+                            featureBaseVertex + currRingVertex,
+                            featureBaseVertex + nextRingVertex
+                        );
+                    } else {
+                        if (hasFootprint === true) {
+                            indices.push(
+                                featureBaseVertex + currRingVertex * 2,
+                                featureBaseVertex + nextRingVertex * 2
+                            );
+                        }
+                        indices.push(
+                            featureBaseVertex + currRingVertex * 2 + 1,
+                            featureBaseVertex + nextRingVertex * 2 + 1
+                        );
+
+                        if (maxSlope !== undefined) {
+                            if (prevRingVertex !== undefined) {
+                                const prevPos = (featureBaseVertex + prevRingVertex * 2) * 3;
+                                const currPos = (featureBaseVertex + currRingVertex * 2) * 3;
+                                const nextPos = (featureBaseVertex + nextRingVertex * 2) * 3;
+                                tmpEdgeA
+                                    .set(
+                                        positions[currPos] - positions[prevPos],
+                                        positions[currPos + 1] - positions[prevPos + 1],
+                                        positions[currPos + 2] - positions[prevPos + 2]
+                                    )
+                                    .normalize();
+                                tmpEdgeB
+                                    .set(
+                                        positions[nextPos] - positions[currPos],
+                                        positions[nextPos + 1] - positions[currPos + 1],
+                                        positions[nextPos + 2] - positions[currPos + 2]
+                                    )
+                                    .normalize();
+                                if (tmpEdgeA.dot(tmpEdgeB) <= maxSlope) {
+                                    indices.push(
+                                        featureBaseVertex + currRingVertex * 2,
+                                        featureBaseVertex + currRingVertex * 2 + 1
+                                    );
+                                }
+                            }
+                        } else {
+                            indices.push(
+                                featureBaseVertex + currRingVertex * 2,
+                                featureBaseVertex + currRingVertex * 2 + 1
+                            );
+                        }
+                    }
+                    prevRingVertex = currRingVertex;
+                    currRingVertex = nextRingVertex;
+                }
+            }
+            currRingVertex = maxRingVertex + 1;
+            firstRingVertex = undefined;
+            prevRingVertex = undefined;
+        }
+    }
+
+    private addWalls(
+        featureBaseVertex: number,
+        featureVertexCount: number,
+        vertexStride: number,
+        featureStride: number,
+        vertices: number[],
+        indices: number[]
+    ) {
+        let firstRingVertex: number | undefined;
+        let currRingVertex = 0;
+        let maxRingVertex = 0;
+
+        while (currRingVertex < featureVertexCount) {
+            while (currRingVertex !== firstRingVertex) {
+                if (firstRingVertex === undefined) {
+                    firstRingVertex = currRingVertex;
+                }
+                if (currRingVertex < featureVertexCount) {
+                    maxRingVertex = Math.max(maxRingVertex, currRingVertex);
+                }
+
+                const nextRingVertex = vertices[currRingVertex * vertexStride + featureStride + 1];
+                if (nextRingVertex < 0) {
+                    break;
+                } else {
+                    indices.push(
+                        featureBaseVertex + currRingVertex * 2,
+                        featureBaseVertex + currRingVertex * 2 + 1,
+                        featureBaseVertex + nextRingVertex * 2 + 1,
+                        featureBaseVertex + nextRingVertex * 2 + 1,
+                        featureBaseVertex + nextRingVertex * 2,
+                        featureBaseVertex + currRingVertex * 2
+                    );
+                }
+                currRingVertex = nextRingVertex;
+            }
+            currRingVertex = maxRingVertex + 1;
+            firstRingVertex = undefined;
+        }
+    }
+
+    private findRelativePositionInLine(p: THREE.Vector3, line: number[]): number {
+        let lineDist = Infinity;
+        let lineOffset = 0;
+        for (let i = 0; i < line.length; i += 4) {
+            // Find the closest point C in segment AB to point P.
+            tmpLine.set(
+                tmpPointA.set(line[i], line[i + 1], line[i + 2]),
+                tmpPointB.set(line[i + 4], line[i + 5], line[i + 6])
+            );
+            tmpLine.closestPointToPoint(p, true, tmpPointC);
+
+            // If P is in AB (or really close), save A as anchor point and C (to estimate distance
+            // from segment origin).
+            const dist = tmpPointC.distanceTo(p);
+            if (dist < lineDist) {
+                tmpPointD.copy(tmpPointC);
+                tmpPointE.copy(tmpPointA);
+                lineDist = dist;
+                lineOffset = line[i + 3];
+            }
+        }
+        // Return the relative position of P inside the line.
+        return lineOffset + tmpPointD.distanceTo(tmpPointE);
     }
 }

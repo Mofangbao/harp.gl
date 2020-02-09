@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeoCoordinates } from "@here/harp-geoutils";
-import { MapControls } from "@here/harp-map-controls";
+import { MapControls, MapControlsUI } from "@here/harp-map-controls";
 import { CopyrightElementHandler, MapView } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import { accessToken } from "../config";
@@ -83,9 +82,9 @@ export namespace DatasourceXYZMVTExample {
 
         // snippet:harp_gl_datasource_xyzmvt_example_2.ts
         const mapControls = new MapControls(map);
-        mapControls.maxPitchAngle = 50;
-        const NY = new GeoCoordinates(40.707, -74.01);
-        map.lookAt(NY, 4000, 50);
+        mapControls.maxTiltAngle = 50;
+        const ui = new MapControlsUI(mapControls, { zoomLevel: "input", projectionSwitch: true });
+        canvas.parentElement!.appendChild(ui.domElement);
         // end:harp_gl_datasource_xyzmvt_example_2.ts
 
         // snippet:harp_gl_datasource_xyzmvt_example_3.ts

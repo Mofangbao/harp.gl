@@ -165,6 +165,7 @@ export const AuthenticationTypeTomTomV1: AuthenticationMethodInfo = {
     method: AuthenticationMethod.QueryString,
     name: "key"
 };
+
 export const AuthenticationTypeAccessToken: AuthenticationMethodInfo = {
     method: AuthenticationMethod.QueryString,
     name: "access_token"
@@ -172,10 +173,47 @@ export const AuthenticationTypeAccessToken: AuthenticationMethodInfo = {
 
 export interface OmvRestClientParameters {
     /**
+     * `URL` pattern used to fetch tile files.
+     *
+     * `URL` with special keywords replaced to retrieve specific tile:
+     *  - `{z}` - zoom level of tile, @see [[TileKey.level]]
+     *  - `{x}` - horizontal coordinate of tile (column number), @see [[TileKey.column]]
+     *  - `{y}` - vertical coordinate of Tile (row number), @see [[TileKey.row]]
+     *
+     * Examples of `url` patterns:
+     * ```
+     *   https://my-base-url.com/vector-tiles/{z}/{x}/{y}.mvt
+     *   https://xyz.api.here.com/tiles/herebase.02/{z}/{x}/{y}/omv
+     *   https://xyz.api.here.com/tiles/osmbase/512/all/{z}/{x}/{y}.mvt
+     * ```
+     *
+     * Note: To add authentication headers and/or query params, use [[authMethod]], [[urlParams]]
+     * properties or embed token directly in `url`.
+     *
+     * Complete examples:
+     * ```
+     * // XYZ OSM with authentication using query param
+     * {
+     *     url: "https://xyz.api.here.com/tiles/osmbase/512/all/{z}/{x}/{y}.mvt",
+     *     urlParams: {
+     *           access_token: accessToken
+     *     },
+     * }
+     * // HERE Vector Tile with authentication using bearer token retrieved by callback
+     * {
+     *     url: "https://vector.hereapi.com/v2/vectortiles/base/mc/{z}/{x}/{y}/omv",
+     *     authenticationMethod: AuthenticationTypeBearer,
+     *     authenticationCode: () => getBearerToken()
+     * }
+     * ```
+     */
+    url?: string;
+
+    /**
      * The base URL of the REST Tile Service.
      * @see [[APIFormat]] for the definition of `baseUrl`.
      */
-    baseUrl: string;
+    baseUrl?: string;
 
     /**
      * Authentication code used for the different APIs.
@@ -216,6 +254,12 @@ export interface OmvRestClientParameters {
      * @deprecated Please use [[authenticationCode]].
      */
     getBearerToken?: () => Promise<string>;
+
+    /**
+     * Array of query parameters to be appended at the end of the url.
+     * It is empty by default.
+     */
+    urlParams?: { [key: string]: string };
 }
 
 /**
@@ -223,12 +267,14 @@ export interface OmvRestClientParameters {
  */
 export class OmvRestClient implements DataProvider {
     private readonly downloadManager: TransferManager;
+    private readonly urlParams: { [key: string]: string };
 
     constructor(readonly params: OmvRestClientParameters) {
         this.downloadManager =
             params.downloadManager === undefined
                 ? TransferManager.instance()
                 : params.downloadManager;
+        this.urlParams = params.urlParams === undefined ? {} : params.urlParams;
     }
 
     /** Overriding abstract method, in this case doing nothing. */
@@ -280,6 +326,7 @@ export class OmvRestClient implements DataProvider {
         const authenticationCode = await this.getActualAuthenticationCode();
 
         tileUrl = this.applyAuthCode(tileUrl, init, authenticationCode);
+        tileUrl = this.addQueryParams(tileUrl, this.urlParams);
 
         if (this.params.apiFormat === APIFormat.XYZJson) {
             return this.downloadManager.downloadJson(tileUrl, init);
@@ -354,8 +401,10 @@ export class OmvRestClient implements DataProvider {
             const authType = authMethod.name || "Bearer";
             (init.headers as Headers).append("Authorization", `${authType} ${authenticationCode}`);
         } else if (authMethod.method === AuthenticationMethod.QueryString) {
-            const attrName = authMethod.name || "access_token";
-            url = this.addQueryParams(url, [[attrName, authenticationCode]]);
+            const attrName: string = authMethod.name || "access_token";
+            const authParams: { [key: string]: string } = {};
+            authParams[attrName] = authenticationCode;
+            url = this.addQueryParams(url, authParams);
         }
         return url;
     }
@@ -364,6 +413,12 @@ export class OmvRestClient implements DataProvider {
      * Get actual tile URL depending on configured API format.
      */
     private dataUrl(tileKey: TileKey): string {
+        if (this.params.url !== undefined) {
+            return this.params.url
+                .replace("{x}", String(tileKey.column))
+                .replace("{y}", String(tileKey.row))
+                .replace("{z}", String(tileKey.level));
+        }
         let path = [`/${tileKey.level}`, tileKey.column, tileKey.row].join(
             this.params.apiFormat === APIFormat.XYZSpace ? "_" : "/"
         );
@@ -395,15 +450,16 @@ export class OmvRestClient implements DataProvider {
         return this.params.baseUrl + path;
     }
 
-    private addQueryParams(url: string, queryParams: Array<[string, string]>): string {
+    private addQueryParams(url: string, queryParams: { [key: string]: string }): string {
         let queryString = "";
         let concatinator = url.indexOf("?") !== -1 ? "&" : "?";
-        for (const param of queryParams) {
-            queryString += concatinator + param[0] + "=" + param[1];
+        Object.getOwnPropertyNames(queryParams).forEach(property => {
+            const prop = property as keyof typeof queryParams;
+            queryString += concatinator + prop + "=" + queryParams[prop];
             if (concatinator === "?") {
                 concatinator = "&";
             }
-        }
+        });
         return url + queryString;
     }
 }

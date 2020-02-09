@@ -7,7 +7,7 @@
 // tslint:disable:only-arrow-functions
 //    Mocha discourages using arrow functions, see https://mochajs.org/#arrow-functions
 
-import { GeoCoordinates, MathUtils, mercatorProjection, TileKey } from "@here/harp-geoutils";
+import { GeoCoordinates, mercatorProjection, TileKey } from "@here/harp-geoutils";
 import { expect } from "chai";
 import * as THREE from "three";
 import { MapView } from "../lib/MapView";
@@ -18,7 +18,8 @@ const cameraMock = {
     rotation: {
         z: 0
     },
-    quaternion: new THREE.Quaternion()
+    quaternion: new THREE.Quaternion(),
+    matrixWorld: new THREE.Matrix4()
 };
 
 describe("map-view#Utils", function() {
@@ -33,16 +34,16 @@ describe("map-view#Utils", function() {
         };
         const mapView = (mapViewMock as any) as MapView;
 
-        let result = MapViewUtils.calculateZoomLevelFromDistance(0, mapView);
+        let result = MapViewUtils.calculateZoomLevelFromDistance(mapView, 0);
         expect(result).to.be.equal(20);
-        result = MapViewUtils.calculateZoomLevelFromDistance(1000000000000, mapView);
+        result = MapViewUtils.calculateZoomLevelFromDistance(mapView, 1000000000000);
         expect(result).to.be.equal(1);
         /*
          *   23.04.2018 - Zoom level outputs come from HARP
          */
-        result = MapViewUtils.calculateZoomLevelFromDistance(1000, mapView);
-        result = MapViewUtils.calculateZoomLevelFromDistance(10000, mapView);
-        result = MapViewUtils.calculateZoomLevelFromDistance(1000000, mapView);
+        result = MapViewUtils.calculateZoomLevelFromDistance(mapView, 1000);
+        result = MapViewUtils.calculateZoomLevelFromDistance(mapView, 10000);
+        result = MapViewUtils.calculateZoomLevelFromDistance(mapView, 1000000);
         expect(result).to.be.closeTo(5.32, 0.05);
     });
 
@@ -74,15 +75,16 @@ describe("map-view#Utils", function() {
         expect(cameraCoordinates.longitude).to.equal(-9.842237006382904);
     });
 
-    describe("converts zoom level to height and height to zoom level", function() {
-        const distance = 1000;
+    describe("converts zoom level to distance and distance to zoom level", function() {
         let mapViewMock: any;
 
         beforeEach(function() {
             mapViewMock = {
                 maxZoomLevel: 20,
                 minZoomLevel: 1,
-                camera: cameraMock,
+                camera: {
+                    matrixWorld: new THREE.Matrix4()
+                },
                 projection: mercatorProjection,
                 focalLength: 256,
                 pixelRatio: 1.0
@@ -90,26 +92,29 @@ describe("map-view#Utils", function() {
         });
 
         it("ensures that both functions are inverse", function() {
-            const zoomLevel = MapViewUtils.calculateZoomLevelFromDistance(distance, {
-                ...mapViewMock
-            });
+            mapViewMock.camera.matrixWorld.makeRotationX(THREE.Math.degToRad(30));
 
-            const calculatedHeight = MapViewUtils.calculateDistanceToGroundFromZoomLevel(
-                mapViewMock,
-                zoomLevel
-            );
-
-            expect(distance).to.be.closeTo(calculatedHeight, Math.pow(10, -11));
+            for (let zoomLevel = 1; zoomLevel <= 20; zoomLevel += 0.1) {
+                const distance = MapViewUtils.calculateDistanceFromZoomLevel(
+                    mapViewMock,
+                    zoomLevel
+                );
+                const calculatedZoomLevel = MapViewUtils.calculateZoomLevelFromDistance(
+                    mapViewMock,
+                    distance
+                );
+                expect(zoomLevel).to.be.closeTo(calculatedZoomLevel, 1e-14);
+            }
         });
     });
 
     it("calculates horizontal and vertical fov", function() {
         const vFov = 60;
-        const hFov = MathUtils.radToDeg(
-            MapViewUtils.calculateHorizontalFovByVerticalFov(MathUtils.degToRad(vFov), 0.9)
+        const hFov = THREE.Math.radToDeg(
+            MapViewUtils.calculateHorizontalFovByVerticalFov(THREE.Math.degToRad(vFov), 0.9)
         );
-        const calculatedVFov = MathUtils.radToDeg(
-            MapViewUtils.calculateVerticalFovByHorizontalFov(MathUtils.degToRad(hFov), 0.9)
+        const calculatedVFov = THREE.Math.radToDeg(
+            MapViewUtils.calculateVerticalFovByHorizontalFov(THREE.Math.degToRad(hFov), 0.9)
         );
         expect(vFov).to.be.closeTo(calculatedVFov, 0.00000000001);
     });

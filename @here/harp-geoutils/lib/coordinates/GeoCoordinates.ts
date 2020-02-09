@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeoCoordinatesLike } from "./GeoCoordinatesLike";
+import { GeoCoordinatesLike, isGeoCoordinatesLike } from "./GeoCoordinatesLike";
+import { GeoPointLike, isGeoPointLike } from "./GeoPointLike";
+import { isLatLngLike, LatLngLike } from "./LatLngLike";
 
-const RAD2DEG = 180.0 / Math.PI;
-const DEG2RAD = Math.PI / 180.0;
+import * as THREE from "three";
+
+/**
+ * Represents an object in different geo coordinate formats
+ */
+export type GeoCoordLike = GeoPointLike | GeoCoordinatesLike | LatLngLike;
 
 /**
  * `GeoCoordinates` is used to represent geo positions.
@@ -32,7 +38,73 @@ export class GeoCoordinates implements GeoCoordinatesLike {
      * @param altitude Altitude in meters.
      */
     static fromRadians(latitude: number, longitude: number, altitude?: number): GeoCoordinates {
-        return new GeoCoordinates(latitude * RAD2DEG, longitude * RAD2DEG, altitude);
+        return new GeoCoordinates(
+            THREE.Math.radToDeg(latitude),
+            THREE.Math.radToDeg(longitude),
+            altitude
+        );
+    }
+
+    /**
+     * Creates a [[GeoCoordinates]] from a [[LatLngLike]] literal.
+     * ```typescript
+     * const center = { lat: 53.3, lng: 13.4 };
+     * mapView.geoCenter = GeoCoordinates.fromLatLng(center);
+     * ```
+     * @param latLng A [[LatLngLike]] object literal.
+     */
+    static fromLatLng(latLng: LatLngLike) {
+        return new GeoCoordinates(latLng.lat, latLng.lng);
+    }
+
+    /**
+     * Creates a [[GeoCoordinates]] from a [[GeoPointLike]] tuple.
+     *
+     * Example:
+     * ```typescript
+     * mapView.geoCenter = GeoCoordinates.fromGeoPoint([longitude, latitude]);
+     *
+     * let geoCoords: number[] = ...;
+     *
+     * if (isGeoPointLike(geoCoords)) {
+     *     const p = GeoCoordinates.fromGeoPoint(geoCoords);
+     * }
+     * ```
+     * @param geoPoint An [[Array]] of at least two elements following the order
+     * longitude, latitude, altitude.
+     */
+    static fromGeoPoint(geoPoint: GeoPointLike): GeoCoordinates {
+        return new GeoCoordinates(geoPoint[1], geoPoint[0], geoPoint[2]);
+    }
+
+    /**
+     * Creates a [[GeoCoordinates]] from different types of geo coordinate objects.
+     *
+     * Example:
+     * ```typescript
+     * const fromGeoPointLike = GeoCoordinates.fromObject([longitude, latitude]);
+     * const fromGeoCoordinateLike = GeoCoordinates.fromObject({ longitude, latitude });
+     * const fromGeoCoordinate = GeoCoordinates.fromObject(new GeoCoordinates(latitude, longitude));
+     * const fromLatLngLike = GeoCoordinates.fromObject({ lat: latitude , lng: longitude });
+     * ```
+     *
+     * @param geoPoint Either [[GeoPointLike]], [[GeoCoordinatesLike]]
+     * or [[LatLngLike]] object literal.
+     */
+    static fromObject(geoPoint: GeoCoordLike): GeoCoordinates {
+        if (isGeoPointLike(geoPoint)) {
+            return GeoCoordinates.fromGeoPoint(geoPoint);
+        } else if (isGeoCoordinatesLike(geoPoint)) {
+            return GeoCoordinates.fromDegrees(
+                geoPoint.latitude,
+                geoPoint.longitude,
+                geoPoint.altitude
+            );
+        } else if (isLatLngLike(geoPoint)) {
+            return GeoCoordinates.fromDegrees(geoPoint.lat, geoPoint.lng);
+        }
+
+        throw new Error("Invalid input coordinate format.");
     }
 
     /**
@@ -48,14 +120,14 @@ export class GeoCoordinates implements GeoCoordinatesLike {
      * Returns the latitude in radians.
      */
     get latitudeInRadians(): number {
-        return this.latitude * DEG2RAD;
+        return THREE.Math.degToRad(this.latitude);
     }
 
     /**
      * Returns the longitude in radians.
      */
     get longitudeInRadians(): number {
-        return this.longitude * DEG2RAD;
+        return THREE.Math.degToRad(this.longitude);
     }
 
     /**
@@ -73,6 +145,20 @@ export class GeoCoordinates implements GeoCoordinatesLike {
     get longitudeInDegrees(): number {
         return this.longitude;
     } // compat api
+
+    /**
+     * The latitude in the degrees.
+     */
+    get lat() {
+        return this.latitude;
+    }
+
+    /**
+     * The longitude in the degrees.
+     */
+    get lng() {
+        return this.longitude;
+    }
 
     /**
      * Returns `true` if this `GeoCoordinates` is valid; returns `false` otherwise.
@@ -154,5 +240,21 @@ export class GeoCoordinates implements GeoCoordinatesLike {
      */
     clone(): GeoCoordinates {
         return new GeoCoordinates(this.latitude, this.longitude, this.altitude);
+    }
+
+    /**
+     * Returns this [[GeoCoordinates]] as [[LatLngLike]] literal.
+     */
+    toLatLng(): LatLngLike {
+        return { lat: this.latitude, lng: this.longitude };
+    }
+
+    /**
+     * Converts this [[GeoCoordinates]] to a [[GeoPointLike]].
+     */
+    toGeoPoint(): GeoPointLike {
+        return this.altitude !== undefined
+            ? [this.longitude, this.latitude, this.altitude]
+            : [this.longitude, this.latitude];
     }
 }

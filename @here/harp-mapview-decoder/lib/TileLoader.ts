@@ -22,9 +22,6 @@ const logger = LoggerManager.instance.create("TileLoader");
 /**
  * The [[TileLoader]] manages the different states of loading and decoding for a [[Tile]]. Used by
  * the [[TileDataSource]].
- *
- * A TileLoader supports loading for multiple tiles, this is required for the wrap around, where
- * it is possible to see the same tile multiple times.
  */
 export class TileLoader {
     /**
@@ -73,13 +70,6 @@ export class TileLoader {
     protected rejectedDonePromise?: (state: TileLoaderState) => void;
 
     /**
-     * This is a form of reference counting for the result. We keep a track of this because when
-     * cancelling, it is important to know if we can actually cancel, or if there is another Tile
-     * that needs the result.
-     */
-    private countRequests: number = 0;
-
-    /**
      * Set up loading of a single [[Tile]].
      *
      * @param dataSource The [[DataSource]] the tile belongs to.
@@ -104,25 +94,17 @@ export class TileLoader {
     loadAndDecode(): Promise<TileLoaderState> {
         switch (this.state) {
             case TileLoaderState.Loading:
-                this.countRequests++;
+            case TileLoaderState.Loaded:
+            case TileLoaderState.Decoding:
+                // tile is already loading
                 return this.donePromise!;
 
             case TileLoaderState.Ready:
             case TileLoaderState.Failed:
             case TileLoaderState.Initialized:
             case TileLoaderState.Canceled:
-                this.countRequests++;
-                this.ensureLoadingStarted();
-                return this.donePromise!;
-
-            case TileLoaderState.Loaded:
-                this.countRequests++;
-                this.startDecodeTile();
-                return this.donePromise!;
-
-            case TileLoaderState.Decoding:
-                this.cancelDecoding();
-                this.ensureLoadingStarted();
+                // restart loading
+                this.startLoading();
                 return this.donePromise!;
         }
     }
@@ -141,15 +123,10 @@ export class TileLoader {
     }
 
     /**
-     * Cancel loading of the [[Tile]] if there is only a single request remaining. Cancellation
-     * token is notified, an internal state is cleaned up.
-     *
-     * Otherwise this just reduces the count of requests by one.
+     * Cancel loading of the [[Tile]].
+     * Cancellation token is notified, an internal state is cleaned up.
      */
     cancel() {
-        if (--this.countRequests !== 0) {
-            return;
-        }
         switch (this.state) {
             case TileLoaderState.Loading:
                 this.loadAbortController.abort();
@@ -190,33 +167,9 @@ export class TileLoader {
     }
 
     /**
-     * Depending on state: if not loaded yet, make sure it is loading.
-     */
-    protected ensureLoadingStarted() {
-        switch (this.state) {
-            case TileLoaderState.Ready:
-            case TileLoaderState.Initialized:
-            case TileLoaderState.Canceled:
-                this.doStartLoad();
-                return;
-
-            case TileLoaderState.Loading:
-            case TileLoaderState.Loaded:
-                // we may reuse already started loading promise
-                logger.info("reusing already started load operation");
-                return;
-
-            case TileLoaderState.Decoding:
-                this.cancelDecoding();
-                this.doStartLoad();
-                return;
-        }
-    }
-
-    /**
      * Start loading. Only call if loading did not start yet.
      */
-    protected doStartLoad() {
+    protected startLoading() {
         const myLoadCancellationToken = this.loadAbortController.signal;
         this.dataProvider
             .getTile(this.tileKey, myLoadCancellationToken)
@@ -379,6 +332,7 @@ export class TileLoader {
 export class TileInfoLoader extends TileLoader {
     tileInfo?: TileInfo;
 
+    /** @override */
     protected startDecodeTile() {
         const payload = this.payload;
         if (payload === undefined) {

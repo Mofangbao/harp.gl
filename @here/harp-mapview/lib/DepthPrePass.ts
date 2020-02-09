@@ -4,15 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ExtrudedPolygonTechniqueParams } from "@here/harp-datasource-protocol";
-import { chainCallbacks } from "@here/harp-utils";
 import * as THREE from "three";
+
+import { ExtrudedPolygonTechnique } from "@here/harp-datasource-protocol";
+import { ColorUtils } from "@here/harp-datasource-protocol/lib/ColorUtils";
+import { enforceBlending, MapMeshStandardMaterial } from "@here/harp-materials";
+import { evaluateBaseColorProperty } from "./DecodedTileHelpers";
 
 /**
  * Bitmask used for the depth pre-pass to prevent multiple fragments in the same screen position
  * from rendering color.
  */
 export const DEPTH_PRE_PASS_STENCIL_MASK = 0x01;
+
+/**
+ * Render order offset for the depth pre-pass to ensure that it's rendered first.
+ */
+const DEPTH_PRE_PASS_RENDER_ORDER_OFFSET = 1e-6;
 
 /**
  * Check if technique requires (and not disables) use of depth prepass.
@@ -22,13 +30,26 @@ export const DEPTH_PRE_PASS_STENCIL_MASK = 0x01;
  *
  * @param technique [[BaseStandardTechnique]] instance to be checked
  */
-export function isRenderDepthPrePassEnabled(technique: ExtrudedPolygonTechniqueParams) {
-    return (
-        technique.enableDepthPrePass !== false &&
-        technique.opacity !== undefined &&
-        technique.opacity > 0 &&
-        technique.opacity < 1.0
-    );
+export function isRenderDepthPrePassEnabled(technique: ExtrudedPolygonTechnique) {
+    // Depth pass explicitly disabled
+    if (technique.enableDepthPrePass === false) {
+        return false;
+    }
+    let transparent =
+        technique.opacity !== undefined && technique.opacity > 0.0 && technique.opacity < 1.0;
+    // If not opaque then check if transparency may be modified via alpha in base color.
+    // Otherwise we don't need to even test base color because opacity mixed with any base alpha,
+    // will always produce some transparency effect.
+    if (!transparent) {
+        // We do not support switching depth pass during alpha interpolation, ignore zoom level
+        // when calculating base color value.
+        const color = evaluateBaseColorProperty(technique);
+        if (color !== undefined) {
+            const alpha = ColorUtils.getAlphaFromHex(color);
+            transparent = alpha > 0.0 && alpha < 1.0;
+        }
+    }
+    return transparent;
 }
 
 /**
@@ -45,15 +66,15 @@ export function createDepthPrePassMaterial(baseMaterial: THREE.Material): THREE.
     baseMaterial.depthWrite = false;
     baseMaterial.depthFunc = THREE.EqualDepth;
     baseMaterial.colorWrite = true;
-    baseMaterial.transparent = true;
+    enforceBlending(baseMaterial);
 
     const depthPassMaterial = baseMaterial.clone();
     depthPassMaterial.depthWrite = true;
     depthPassMaterial.depthTest = true;
     depthPassMaterial.depthFunc = THREE.LessDepth;
     depthPassMaterial.colorWrite = false;
-    depthPassMaterial.transparent = false;
     depthPassMaterial.opacity = 1.0;
+    depthPassMaterial.blending = THREE.NoBlending;
     return depthPassMaterial;
 }
 
@@ -65,14 +86,8 @@ export function createDepthPrePassMaterial(baseMaterial: THREE.Material): THREE.
  * support the depth prepass. This method is usable only if the material of this mesh has an
  * opacity value in the range `(0,1)`.
  *
- * About render order: the DepthPrePass object that is created has the same `renderOrder` as
- * the original mesh. The proper sort orders of both the depth and the color pass objects are
- * guaranteed by ThreeJS's handling of transparent objects, which renders them after opaque
- * objects:
- *   - since the depth prepass object is never transparent, it is rendered first
- *   - since the color pass object is transparent, it is rendered second
- *
- * @see [Material.transparent in ThreeJS's doc](https://threejs.org/docs/#api/harp-materials/Material.transparent).
+ * The DepthPrePass object is created wis a slightly smaller `renderOrder` as the original mesh
+ * to ensure that it's rendered first.
  *
  * @param mesh original mesh
  * @returns `Mesh` depth pre pass
@@ -90,14 +105,18 @@ export function createDepthPrePassMesh(mesh: THREE.Mesh): THREE.Mesh {
     }
 
     const depthPassGeometry = new THREE.BufferGeometry();
-    depthPassGeometry.addAttribute("position", positionAttribute);
+    depthPassGeometry.setAttribute("position", positionAttribute);
     const uvAttribute = originalGeometry.getAttribute("uv");
     if (uvAttribute) {
-        depthPassGeometry.addAttribute("uv", uvAttribute);
+        depthPassGeometry.setAttribute("uv", uvAttribute);
+    }
+    const normalAttribute = originalGeometry.getAttribute("normal");
+    if (normalAttribute) {
+        depthPassGeometry.setAttribute("normal", normalAttribute);
     }
     const extrusionAxisAttribute = originalGeometry.getAttribute("extrusionAxis");
     if (extrusionAxisAttribute) {
-        depthPassGeometry.addAttribute("extrusionAxis", extrusionAxisAttribute);
+        depthPassGeometry.setAttribute("extrusionAxis", extrusionAxisAttribute);
     }
 
     if (originalGeometry.index) {
@@ -115,7 +134,7 @@ export function createDepthPrePassMesh(mesh: THREE.Mesh): THREE.Mesh {
             : createDepthPrePassMaterial(mesh.material);
 
     const depthPassMesh = new THREE.Mesh(depthPassGeometry, depthPassMaterial);
-    depthPassMesh.renderOrder = mesh.renderOrder;
+    depthPassMesh.renderOrder = mesh.renderOrder - DEPTH_PRE_PASS_RENDER_ORDER_OFFSET;
 
     return depthPassMesh;
 }
@@ -131,42 +150,28 @@ export function createDepthPrePassMesh(mesh: THREE.Mesh): THREE.Mesh {
  */
 export function setDepthPrePassStencil(depthMesh: THREE.Mesh, colorMesh: THREE.Mesh) {
     // Set up depth mesh stencil logic.
-    // Set the depth pre-pass stencil bit for all processed fragments. We use `gl.ALWAYS` and not
-    // `gl.NOTEQUAL` to force all fragments to pass the stencil test and write the correct depth
-    // value.
-    depthMesh.onBeforeRender = chainCallbacks(
-        depthMesh.onBeforeRender,
-        (renderer, scene, camera, geometry, material, group) => {
-            const gl = renderer.context;
-            renderer.state.buffers.stencil.setTest(true);
-            renderer.state.buffers.stencil.setMask(DEPTH_PRE_PASS_STENCIL_MASK);
-            renderer.state.buffers.stencil.setOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-            renderer.state.buffers.stencil.setFunc(gl.ALWAYS, 0xff, DEPTH_PRE_PASS_STENCIL_MASK);
-        }
-    );
+    // Set the depth pre-pass stencil bit for all processed fragments. We use
+    // `THREE.AlwaysStencilFunc` and not `THREE.NotEqualStencilFunc` to force all fragments to pass
+    // the stencil test and write the correct depth value.
+    const depthMaterial = depthMesh.material as MapMeshStandardMaterial;
+    depthMaterial.stencilWrite = true;
+    depthMaterial.stencilFail = THREE.KeepStencilOp;
+    depthMaterial.stencilZFail = THREE.KeepStencilOp;
+    depthMaterial.stencilZPass = THREE.ReplaceStencilOp;
+    depthMaterial.stencilFunc = THREE.AlwaysStencilFunc;
+    depthMaterial.stencilRef = 0xff;
+    (depthMaterial as any).stencilFuncMask = DEPTH_PRE_PASS_STENCIL_MASK;
 
     // Set up color mesh stencil logic.
     // Only write color for pixels with the depth pre-pass stencil bit set. Also, once a pixel is
     // rendered, set the stencil bit to 0 to prevent subsequent pixels in the same clip position
     // from rendering color again.
-    colorMesh.onBeforeRender = chainCallbacks(
-        colorMesh.onBeforeRender,
-        (renderer, scene, camera, geometry, material, group) => {
-            const gl = renderer.context;
-            renderer.state.buffers.stencil.setTest(true);
-            renderer.state.buffers.stencil.setMask(DEPTH_PRE_PASS_STENCIL_MASK);
-            renderer.state.buffers.stencil.setOp(gl.KEEP, gl.KEEP, gl.ZERO);
-            renderer.state.buffers.stencil.setFunc(gl.EQUAL, 0xff, DEPTH_PRE_PASS_STENCIL_MASK);
-        }
-    );
-
-    // Disable stencil test after rendering each mesh.
-    depthMesh.onAfterRender = renderer => {
-        renderer.state.buffers.stencil.setTest(false);
-        renderer.state.buffers.stencil.setMask(0xff);
-    };
-    colorMesh.onAfterRender = renderer => {
-        renderer.state.buffers.stencil.setTest(false);
-        renderer.state.buffers.stencil.setMask(0xff);
-    };
+    const colorMaterial = colorMesh.material as MapMeshStandardMaterial;
+    colorMaterial.stencilWrite = true;
+    colorMaterial.stencilFail = THREE.KeepStencilOp;
+    colorMaterial.stencilZFail = THREE.KeepStencilOp;
+    colorMaterial.stencilZPass = THREE.ZeroStencilOp;
+    colorMaterial.stencilFunc = THREE.EqualStencilFunc;
+    colorMaterial.stencilRef = 0xff;
+    (colorMaterial as any).stencilFuncMask = DEPTH_PRE_PASS_STENCIL_MASK;
 }

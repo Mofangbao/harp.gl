@@ -10,9 +10,14 @@ import {
     FeatureGeometry,
     GeometryCollection
 } from "@here/harp-datasource-protocol";
-import { GeoJsonDataProvider } from "@here/harp-geojson-datasource";
-import { OmvDataSource } from "@here/harp-omv-datasource";
+import { GeoJsonDataProvider, GeoJsonDataProviderOptions } from "@here/harp-geojson-datasource";
+import { GeoBox, GeoCoordinates } from "@here/harp-geoutils";
+import { MapView } from "@here/harp-mapview";
+import { OmvDataSource, OmvDataSourceParameters } from "@here/harp-omv-datasource";
+import { LoggerManager } from "@here/harp-utils";
 import { MapViewFeature } from "./Features";
+
+const logger = LoggerManager.instance.create("FeaturesDataSource");
 
 const NAME = "user-features-datasource";
 const DEFAULT_GEOJSON: FeatureCollection = {
@@ -21,21 +26,51 @@ const DEFAULT_GEOJSON: FeatureCollection = {
 };
 
 /**
+ * Options for [[FeaturesDataSource]].
+ */
+export interface FeatureDataSourceOptions
+    extends OmvDataSourceParameters,
+        GeoJsonDataProviderOptions {
+    /**
+     * Initial set of features for new instance of [[FeaturesDataSource]].
+     *
+     * Shortcut for calling [[FeaturesDataSource.add]] after construction.
+     */
+    features?: MapViewFeature[];
+
+    /**
+     * Initial GeoJSON load for new instance of [[FeaturesDataSource]].
+     *
+     * Shortcut for calling [[FeaturesDataSource.setFromGeojson]] after construction.
+     */
+    geojson?: FeatureCollection | GeometryCollection | Feature;
+}
+
+/**
  * [[DataSource]] implementation to use for the addition of custom features.
  */
 export class FeaturesDataSource extends OmvDataSource {
+    private m_isAttached = false;
     private m_featureCollection: FeatureCollection = this.emptyGeojson();
 
     /**
      * Builds a `FeaturesDataSource`.
      *
-     * @param workerTilerUrl Worker tiler URL. Defaults to `./decoder.bundle.ts` in the
-     * [[ConcurrentTilerFacade]].
+     * @param options specify custom options using [[FeatureDataSourceOptions]] interface.
      */
-    constructor(workerTilerUrl?: string) {
+    constructor(options?: FeatureDataSourceOptions) {
         super({
-            dataProvider: new GeoJsonDataProvider(NAME, DEFAULT_GEOJSON, { workerTilerUrl })
+            ...options,
+            dataProvider: new GeoJsonDataProvider(NAME, DEFAULT_GEOJSON, options)
         });
+        if (options !== undefined) {
+            if (options.features !== undefined) {
+                this.add(...options.features);
+            }
+            if (options.geojson !== undefined) {
+                this.setFromGeojson(options.geojson);
+            }
+        }
     }
 
     /**
@@ -101,6 +136,72 @@ export class FeaturesDataSource extends OmvDataSource {
         this.update();
     }
 
+    /** @override */
+    async connect(): Promise<void> {
+        await super.connect();
+        if (this.m_featureCollection.features.length > 0) {
+            await this.update();
+        }
+    }
+    /**
+     * Override [[DataSource.attach]] to know if we're really connected to [[MapView]].
+     * @param mapView
+     * @override
+     */
+    attach(mapView: MapView): void {
+        super.attach(mapView);
+        this.m_isAttached = true;
+    }
+
+    /**
+     * Override [[DataSource.detach]] to know if we're really connected to [[MapView]].
+     * @param mapView
+     * @override
+     */
+    detach(mapView: MapView): void {
+        super.detach(mapView);
+        this.m_isAttached = false;
+    }
+
+    /**
+     * Get [[GeoBox]] containing all the points in datasource.
+     *
+     * Returns undefined if there were no features added to this DS.
+     */
+    getGeoBox(): GeoBox | undefined {
+        let result: GeoBox | undefined;
+        const addPoint = (geoJsonCoords: number[]) => {
+            // NOTE: GeoJson coordinates are in [longitute, latitute] order!
+            const coords = new GeoCoordinates(geoJsonCoords[1], geoJsonCoords[0]);
+            if (result === undefined) {
+                result = new GeoBox(coords, coords.clone());
+            } else {
+                result.growToContain(coords);
+            }
+        };
+        for (const feature of this.m_featureCollection.features) {
+            switch (feature.geometry.type) {
+                case "Point":
+                    addPoint(feature.geometry.coordinates);
+                    break;
+                case "MultiPoint":
+                case "LineString":
+                    feature.geometry.coordinates.forEach(addPoint);
+                    break;
+                case "MultiLineString":
+                case "Polygon":
+                    feature.geometry.coordinates.forEach(segment => segment.forEach(addPoint));
+                    break;
+                case "MultiPolygon":
+                    feature.geometry.coordinates.forEach(polygon =>
+                        polygon.forEach(segment => segment.forEach(addPoint))
+                    );
+                    break;
+            }
+        }
+        return result;
+    }
+
     private addFeature(feature: MapViewFeature) {
         // Check if the feature is not already in there.
         const hasFeature = this.m_featureCollection.features.some(
@@ -138,10 +239,21 @@ export class FeaturesDataSource extends OmvDataSource {
         this.m_featureCollection.features.splice(index, 1);
     }
 
-    private update() {
-        (this.dataProvider() as GeoJsonDataProvider).updateInput(this.m_featureCollection);
-        this.mapView.markTilesDirty(this);
-        this.mapView.clearTileCache(this.name);
+    private async update() {
+        const dataProvider = this.dataProvider() as GeoJsonDataProvider;
+        if (!this.m_isAttached || !dataProvider.ready()) {
+            return;
+        }
+
+        try {
+            await dataProvider.updateInput(this.m_featureCollection);
+            if (this.m_isAttached) {
+                this.mapView.markTilesDirty(this);
+            }
+        } catch (error) {
+            // We use `update` in sync API, so there's no-one to react to errors so log them.
+            logger.error(`[${this.name}]: failed to update tile index`, error);
+        }
     }
 
     private emptyGeojson(): FeatureCollection {

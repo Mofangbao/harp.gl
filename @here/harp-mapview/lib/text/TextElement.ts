@@ -8,7 +8,6 @@ import {
     GeometryKind,
     GeometryKindSet,
     ImageTexture,
-    isLineMarkerTechnique,
     LineMarkerTechnique,
     PoiStackMode,
     PoiTechnique
@@ -27,6 +26,7 @@ import * as THREE from "three";
 
 import { ImageItem } from "../image/Image";
 import { PickResult } from "../PickHandler";
+import { TextElementType } from "./TextElementType";
 
 /**
  * Additional information for an icon that is to be rendered along with a [[TextElement]].
@@ -173,22 +173,20 @@ export interface PoiInfo {
     renderOrder?: number;
 }
 
+/**
+ * Return 'true' if the POI has been successfully prepared for rendering.
+ *
+ * @param poiInfo PoiInfo containing information for rendering the POI icon.
+ */
+export function poiIsRenderable(poiInfo: PoiInfo): boolean {
+    return poiInfo.poiRenderBatch !== undefined;
+}
+
 export interface TextPickResult extends PickResult {
     /**
      * Text of the picked [[TextElement]]
      */
     text?: string;
-}
-
-/**
- * State of fading.
- */
-export enum FadingState {
-    Undefined = 0,
-    FadingIn = 1,
-    FadedIn = 2,
-    FadingOut = -1,
-    FadedOut = -2
 }
 
 /**
@@ -198,101 +196,6 @@ export enum LoadingState {
     Requested,
     Loaded,
     Initialized
-}
-
-/**
- * Time to fade in/fade out the labels in milliseconds.
- */
-export const DEFAULT_FADE_TIME = 800;
-
-/**
- * State of rendering of the icon and text part of the `TextElement`. Mainly for fading the elements
- * in and out, to compute the opacity.
- *
- * @hidden
- */
-export class RenderState {
-    /**
-     * Create a `RenderState`.
-     *
-     * @param state Fading state.
-     * @param value Current fading value [0..1].
-     * @param startTime Time stamp the fading started.
-     * @param opacity Computed opacity depending on value.
-     * @param lastFrameNumber Latest frame the elements was rendered, allows to detect some less
-     *                        obvious states, like popping up after being hidden.
-     * @param fadingTime Time used to fade in or out.
-     */
-    constructor(
-        public state = FadingState.Undefined,
-        public value = 0.0,
-        public startTime = 0,
-        public opacity = 1.0,
-        public lastFrameNumber = Number.MIN_SAFE_INTEGER,
-        public fadingTime: number = DEFAULT_FADE_TIME
-    ) {}
-
-    /**
-     * Reset existing `RenderState` to appear like a fresh state.
-     */
-    reset() {
-        this.state = FadingState.Undefined;
-        this.value = 0.0;
-        this.startTime = 0.0;
-        this.opacity = 1.0;
-        this.lastFrameNumber = Number.MIN_SAFE_INTEGER;
-    }
-
-    /**
-     * @returns `true` if element is either fading in or fading out.
-     */
-    isFading(): boolean {
-        const fading = this.state === FadingState.FadingIn || this.state === FadingState.FadingOut;
-        return fading;
-    }
-
-    /**
-     * @returns `true` if element is fading in.
-     */
-    isFadingIn(): boolean {
-        const fadingIn = this.state === FadingState.FadingIn;
-        return fadingIn;
-    }
-
-    /**
-     * @returns `true` if element is fading out.
-     */
-    isFadingOut(): boolean {
-        const fadingOut = this.state === FadingState.FadingOut;
-        return fadingOut;
-    }
-
-    /**
-     * @returns `true` if element is done with fading in.
-     */
-    isFadedIn(): boolean {
-        const fadedIn = this.state === FadingState.FadedIn;
-        return fadedIn;
-    }
-
-    /**
-     * @returns `true` if element is done with fading out.
-     */
-    isFadedOut(): boolean {
-        const fadedOut = this.state === FadingState.FadedOut;
-        return fadedOut;
-    }
-
-    /**
-     * @returns `true` if element is either faded in, is fading in or is fading out.
-     */
-    isVisible(): boolean {
-        const visible =
-            this.state === FadingState.FadingIn ||
-            this.state === FadingState.FadedIn ||
-            this.state === FadingState.FadingOut;
-        return visible;
-    }
 }
 
 /**
@@ -373,59 +276,9 @@ export class TextElement {
 
     /**
      * @hidden
-     * Used during label placement for optimization.
-     */
-    tileCenter?: THREE.Vector3;
-
-    /**
-     * @hidden
-     * Used during label placement to reserve space from front to back.
-     */
-    currentViewDistance?: number;
-
-    /**
-     * @hidden
-     * Used during sorting.
-     */
-    sortPriority?: number = 0;
-
-    /**
-     * @hidden
      * Used during rendering.
      */
     loadingState?: LoadingState;
-
-    /**
-     * @hidden
-     * Used during rendering.
-     */
-    iconRenderState?: RenderState;
-
-    /**
-     * @hidden
-     * Used during rendering.
-     */
-    textRenderState?: RenderState;
-
-    /**
-     * @hidden
-     * Used during rendering. Used for line markers only, which have a points array and multiple
-     * icon positions to render. Since line markers use the same renderState for text part and icon,
-     * there is no separate array of [[RenderState]]s for the text parts of the line markers.
-     */
-    iconRenderStates?: RenderState[];
-
-    /**
-     * @hidden
-     * Text rendering style.
-     */
-    renderStyle?: TextRenderStyle;
-
-    /**
-     * @hidden
-     * Text rendering style.
-     */
-    layoutStyle?: TextLayoutStyle;
 
     /**
      * @hidden
@@ -462,14 +315,21 @@ export class TextElement {
      */
     dbgPathTooSmall?: boolean;
 
+    pathLengthSqr?: number;
+
+    type: TextElementType;
+
     private m_poiInfo?: PoiInfo;
+
+    private m_renderStyle?: TextRenderStyle;
+
+    private m_layoutStyle?: TextLayoutStyle;
 
     /**
      * Creates a new `TextElement`.
      *
      * @param text The text to display.
-     * @param points The position in world coordinates or a list of points in world coordinates for
-     *              a curved text.
+     * @param points The position or a list of points for a curved text, both in local tile space.
      * @param renderParams `TextElement` text rendering parameters.
      * @param layoutParams `TextElement` text layout parameters.
      * @param priority The priority of the `TextElement. Elements with the highest priority get
@@ -490,12 +350,13 @@ export class TextElement {
         readonly renderParams: TextRenderParameters | TextRenderStyle,
         readonly layoutParams: TextLayoutParameters | TextLayoutStyle,
         public priority = 0,
-        public xOffset?: number,
-        public yOffset?: number,
+        public xOffset: number = 0,
+        public yOffset: number = 0,
         public featureId?: number,
         public style?: string,
         public fadeNear?: number,
-        public fadeFar?: number
+        public fadeFar?: number,
+        readonly tileOffset?: number
     ) {
         if (renderParams instanceof TextRenderStyle) {
             this.renderStyle = renderParams;
@@ -503,11 +364,14 @@ export class TextElement {
         if (layoutParams instanceof TextLayoutStyle) {
             this.layoutStyle = layoutParams;
         }
+
+        this.type =
+            points instanceof THREE.Vector3 ? TextElementType.PoiLabel : TextElementType.PathLabel;
     }
 
     /**
-     * The position of this text element in world coordinates or the first point of the path used to
-     * render a curved text.
+     * The text element position or the first point of the path used to render a curved text, both
+     * in local tile space.
      */
     get position(): THREE.Vector3 {
         if (this.points instanceof Array) {
@@ -518,7 +382,7 @@ export class TextElement {
     }
 
     /**
-     * The list of points in world coordinates used to render the text along a path or `undefined`.
+     * The list of points in local tile space used to render the text along a path or `undefined`.
      */
     get path(): THREE.Vector3[] | undefined {
         if (this.points instanceof Array) {
@@ -555,33 +419,6 @@ export class TextElement {
     }
 
     /**
-     * Determine if the `TextElement` is a line marker.
-     *
-     * @returns `true` if this `TextElement` is a line marker.
-     */
-    get isLineMarker(): boolean {
-        return (
-            this.points !== undefined &&
-            (this.m_poiInfo !== undefined && isLineMarkerTechnique(this.m_poiInfo.technique))
-        );
-    }
-
-    /**
-     * Return the last distance that has been computed for sorting during placement. This may not be
-     * the actual distance if the camera is moving, as the distance is computed only during
-     * placement. If the property `alwaysOnTop` is true, the value returned is always `0`.
-     *
-     * @returns 0 or negative distance to camera.
-     */
-    get renderDistance(): number {
-        return this.alwaysOnTop === true
-            ? 0
-            : this.currentViewDistance !== undefined
-            ? -this.currentViewDistance
-            : 0;
-    }
-
-    /**
      * Contains additional information about icon to be rendered along with text.
      */
     get poiInfo(): PoiInfo | undefined {
@@ -591,9 +428,46 @@ export class TextElement {
     set poiInfo(poiInfo: PoiInfo | undefined) {
         this.m_poiInfo = poiInfo;
         if (poiInfo !== undefined) {
+            if (this.path !== undefined) {
+                this.type = TextElementType.LineMarker;
+            }
             const poiRenderOrder = this.renderOrder !== undefined ? this.renderOrder : 0;
             poiInfo.renderOrder = poiRenderOrder;
         }
+    }
+
+    /**
+     * @returns The style used to render this text element, undefined if not set yet.
+     */
+    get renderStyle(): TextRenderStyle | undefined {
+        return this.m_renderStyle;
+    }
+
+    /**
+     * Sets style used for text rendering.
+     * @param style The style to use.
+     */
+    set renderStyle(style: TextRenderStyle | undefined) {
+        this.m_renderStyle = style;
+    }
+
+    /**
+     * @returns The style used to layout this text element, undefined if not set yet.
+     */
+    get layoutStyle(): TextLayoutStyle | undefined {
+        return this.m_layoutStyle;
+    }
+
+    /**
+     * Sets the style used for text layout.
+     * @param style The style to use.
+     */
+    set layoutStyle(style: TextLayoutStyle | undefined) {
+        this.m_layoutStyle = style;
+    }
+
+    hasFeatureId(): boolean {
+        return this.featureId !== undefined && this.featureId !== 0;
     }
 
     /**

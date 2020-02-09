@@ -4,12 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeometryType, ITileDecoder, StyleSet } from "@here/harp-datasource-protocol";
-import { TileKey, webMercatorTilingScheme } from "@here/harp-geoutils";
+import {
+    AttributeMap,
+    Definitions,
+    GeometryType,
+    ITileDecoder,
+    OptionsMap,
+    StyleSet,
+    WorkerServiceProtocol
+} from "@here/harp-datasource-protocol";
+import { EarthConstants, TileKey, webMercatorTilingScheme } from "@here/harp-geoutils";
 import { LineGroup } from "@here/harp-lines";
-import { CopyrightInfo } from "@here/harp-mapview";
+import { CopyrightInfo, CopyrightProvider } from "@here/harp-mapview";
 import { DataProvider, TileDataSource, TileFactory } from "@here/harp-mapview-decoder";
-import { getOptionValue } from "@here/harp-utils";
+import { getOptionValue, LoggerManager } from "@here/harp-utils";
 import {
     FeatureModifierId,
     OMV_TILE_DECODER_SERVICE_TYPE,
@@ -19,6 +27,8 @@ import {
 import { OmvRestClient, OmvRestClientParameters } from "./OmvRestClient";
 import { OmvTile } from "./OmvTile";
 
+const logger = LoggerManager.instance.create("OmvDataSource");
+
 export interface LinesGeometry {
     type: GeometryType;
     lines: LineGroup;
@@ -26,10 +36,9 @@ export interface LinesGeometry {
     technique: number;
 
     /**
-     * Optional list of feature IDs. Currently only `Number` is supported, will fail if features
-     * have IDs with type `Long`.
+     * Optional array of objects. It can be used to pass user data from the geometry to the mesh.
      */
-    featureIds?: Array<number | undefined>;
+    objInfos?: AttributeMap[];
 
     /**
      * Optional list of feature start indices. The indices point into the index attribute.
@@ -54,23 +63,6 @@ export interface OmvDataSourceParameters {
      *  @default "omv"
      */
     styleSetName?: string;
-
-    /**
-     * Custom layer name to be rendered.
-     */
-    layerName?: string;
-
-    /**
-     * Proxy URL to use.
-     * @see [[HypeDataProviderOptions]].
-     */
-    proxyDataUrl?: string;
-
-    /**
-     * Version of the catalog to obtain. If not specified, the latest available catalog is fetched.
-     * @see [[HypeDataProviderOptions]].
-     */
-    catalogVersion?: number;
 
     /**
      * If set to `true`, features that have no technique in the theme will be printed to the console
@@ -102,8 +94,15 @@ export interface OmvDataSourceParameters {
 
     /**
      * Gather feature IDs from `OmvData`. Defaults to `false`.
+     * @deprecated, FeatureIds are always gathered, use [[gatherFeatureAttributes]] to gather
+     * all feature attributes.
      */
     gatherFeatureIds?: boolean;
+
+    /**
+     * Gather feature attributes from `OmvData`. Defaults to `false`.
+     */
+    gatherFeatureAttributes?: boolean;
 
     /**
      * Gather road segments data from [[OmvData]]. Defaults to `false`.
@@ -138,10 +137,14 @@ export interface OmvDataSourceParameters {
 
     /**
      * Optional, default copyright information of tiles provided by this data source.
-     *
      * Implementation should provide this information from the source data if possible.
      */
     copyrightInfo?: CopyrightInfo[];
+
+    /**
+     * Optional copyright info provider for tiles provided by this data source.
+     */
+    copyrightProvider?: CopyrightProvider;
 
     /**
      * Optional minimum zoom level (storage level) for [[Tile]]s. Default is 1.
@@ -154,9 +157,30 @@ export interface OmvDataSourceParameters {
     maxZoomLevel?: number;
 
     /**
+     * Maximum geometry height above groud level this `OmvDataSource` can produce.
+     *
+     * Used in first stage of frustum culling before [[Tile.maxGeometryHeight]] data is available.
+     *
+     * @default [[EarthConstants.MAX_BUILDING_HEIGHT]].
+     */
+    maxGeometryHeight?: number;
+
+    /**
      * Optional storage level offset for [[Tile]]s. Default is -1.
      */
     storageLevelOffset?: number;
+
+    /**
+     * Indicates whether overlay on elevation is enabled. Defaults to `false`.
+     */
+    enableElevationOverlay?: boolean;
+
+    /**
+     * Indicates whether to add a ground plane to cover the tile completely. This is necessary for
+     * the fallback logic, such that the parent fall back tiles don't overlap the children tiles.
+     * Default is true (i.e. if not defined it is taken to be true)
+     */
+    addGroundPlane?: boolean;
 }
 
 /**
@@ -167,15 +191,20 @@ export interface OmvDataSourceParameters {
 function getDataProvider(params: OmvWithRestClientParams | OmvWithCustomDataProvider) {
     if ((params as OmvWithCustomDataProvider).dataProvider) {
         return (params as OmvWithCustomDataProvider).dataProvider;
-    } else if ((params as OmvWithRestClientParams).baseUrl) {
+    } else if (
+        (params as OmvWithRestClientParams).baseUrl ||
+        (params as OmvWithRestClientParams).url
+    ) {
         return new OmvRestClient(params as OmvRestClientParameters);
     } else {
-        throw new Error("OmvDataSource: missing baseUrl or dataProvider params");
+        throw new Error("OmvDataSource: missing url, baseUrl or dataProvider params");
     }
 }
 
 export type OmvWithRestClientParams = OmvRestClientParameters & OmvDataSourceParameters;
 export type OmvWithCustomDataProvider = OmvDataSourceParameters & { dataProvider: DataProvider };
+
+let missingOmvDecoderServiceInfoEmitted: boolean = false;
 
 export class OmvDataSource extends TileDataSource<OmvTile> {
     private readonly m_decoderOptions: OmvDecoderOptions;
@@ -190,36 +219,52 @@ export class OmvDataSource extends TileDataSource<OmvTile> {
             decoder: m_params.decoder,
             concurrentDecoderScriptUrl: m_params.concurrentDecoderScriptUrl,
             copyrightInfo: m_params.copyrightInfo,
+            copyrightProvider: m_params.copyrightProvider,
             minZoomLevel: getOptionValue(m_params.minZoomLevel, 1),
             maxZoomLevel: getOptionValue(m_params.maxZoomLevel, 14),
             storageLevelOffset: getOptionValue(m_params.storageLevelOffset, -1)
         });
 
         this.cacheable = true;
+        this.addGroundPlane =
+            m_params.addGroundPlane === undefined || m_params.addGroundPlane === true;
 
         this.m_decoderOptions = {
             showMissingTechniques: this.m_params.showMissingTechniques === true,
             filterDescription: this.m_params.filterDescr,
-            gatherFeatureIds: this.m_params.gatherFeatureIds === true,
+            gatherFeatureAttributes: this.m_params.gatherFeatureAttributes === true,
             createTileInfo: this.m_params.createTileInfo === true,
             gatherRoadSegments: this.m_params.gatherRoadSegments === true,
             featureModifierId: this.m_params.featureModifierId,
             skipShortLabels: this.m_params.skipShortLabels,
-            storageLevelOffset: getOptionValue(m_params.storageLevelOffset, -1)
+            storageLevelOffset: getOptionValue(m_params.storageLevelOffset, -1),
+            enableElevationOverlay: this.m_params.enableElevationOverlay === true
         };
+
+        this.maxGeometryHeight = getOptionValue(
+            m_params.maxGeometryHeight,
+            EarthConstants.MAX_BUILDING_HEIGHT
+        );
     }
 
-    /**
-     * Set a theme for the data source instance.
-     * @param styleSet The [[Theme]] to be added.
-     */
-    setStyleSet(styleSet?: StyleSet, languages?: string[]): void {
-        if (styleSet === undefined) {
-            return;
+    /** @override */
+    async connect() {
+        try {
+            await super.connect();
+        } catch (error) {
+            if (
+                WorkerServiceProtocol.isUnknownServiceError(error) &&
+                !missingOmvDecoderServiceInfoEmitted
+            ) {
+                logger.info(
+                    "Unable to create decoder service in worker. Use " +
+                        " 'OmvTileDecoderService.start();' in decoder script."
+                );
+                missingOmvDecoderServiceInfoEmitted = true;
+            }
+            throw error;
         }
-        this.m_tileLoaderCache.clear();
-        this.decoder.configure(styleSet, languages, this.m_decoderOptions);
-        this.mapView.markTilesDirty(this);
+        this.configureDecoder(undefined, undefined, undefined, this.m_decoderOptions);
     }
 
     /**
@@ -227,10 +272,9 @@ export class OmvDataSource extends TileDataSource<OmvTile> {
      * Will be applied to the decoder, which might be shared with other omv datasources.
      */
     removeDataFilter(): void {
-        this.decoder.configure(undefined, undefined, {
+        this.configureDecoder(undefined, undefined, undefined, {
             filterDescription: null
         });
-        this.mapView.markTilesDirty(this);
     }
 
     /**
@@ -244,12 +288,12 @@ export class OmvDataSource extends TileDataSource<OmvTile> {
         this.m_decoderOptions.filterDescription =
             filterDescription !== null ? filterDescription : undefined;
 
-        this.decoder.configure(undefined, undefined, {
+        this.configureDecoder(undefined, undefined, undefined, {
             filterDescription
         });
-        this.mapView.markTilesDirty(this);
     }
 
+    /** @override */
     shouldPreloadTiles(): boolean {
         return true;
     }
@@ -260,34 +304,57 @@ export class OmvDataSource extends TileDataSource<OmvTile> {
      * @param zoomLevel Zoom level.
      * @param tileKey Level of the tile.
      * @returns `true` if the data source should be rendered.
+     * @override
      */
-    shouldRender(zoomLevel: number, tileKey: TileKey): boolean {
+    canGetTile(zoomLevel: number, tileKey: TileKey): boolean {
         if (tileKey.level > this.maxZoomLevel) {
             return false;
         }
-        if (tileKey.level === this.maxZoomLevel && zoomLevel >= this.maxZoomLevel) {
+        if (tileKey.level <= this.maxZoomLevel && zoomLevel >= this.maxZoomLevel) {
             return true;
         }
-        return super.shouldRender(zoomLevel, tileKey);
+        return super.canGetTile(zoomLevel, tileKey);
     }
 
+    /** @override */
     setLanguages(languages?: string[]): void {
         if (languages !== undefined) {
-            this.m_decoder.configure(undefined, languages, undefined);
-            this.mapView.markTilesDirty(this);
+            this.configureDecoder(undefined, undefined, languages, undefined);
         }
     }
 
+    /** @override */
     get storageLevelOffset() {
         return super.storageLevelOffset;
     }
 
+    /** @override */
     set storageLevelOffset(levelOffset: number) {
         super.storageLevelOffset = levelOffset;
-
         this.m_decoderOptions.storageLevelOffset = this.storageLevelOffset;
-        this.m_decoder.configure(undefined, undefined, {
+        this.configureDecoder(undefined, undefined, undefined, {
             storageLevelOffset: this.storageLevelOffset
         });
+    }
+
+    /** @override */
+    setEnableElevationOverlay(enable: boolean) {
+        if (this.m_decoderOptions.enableElevationOverlay !== enable) {
+            this.m_decoderOptions.enableElevationOverlay = enable;
+            this.configureDecoder(undefined, undefined, undefined, {
+                enableElevationOverlay: enable
+            });
+        }
+    }
+
+    private configureDecoder(
+        styleSet?: StyleSet,
+        definitions?: Definitions,
+        languages?: string[],
+        options?: OptionsMap
+    ) {
+        this.clearCache();
+        this.decoder.configure(styleSet, definitions, languages, options);
+        this.mapView.markTilesDirty(this);
     }
 }

@@ -3,7 +3,7 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
-import { StyleSet } from "@here/harp-datasource-protocol";
+import { Definitions, StyleSet, Theme } from "@here/harp-datasource-protocol";
 import { Projection, TileKey, TilingScheme } from "@here/harp-geoutils";
 import { assert } from "@here/harp-utils";
 import * as THREE from "three";
@@ -33,9 +33,22 @@ export abstract class DataSource extends THREE.EventDispatcher {
     cacheable: boolean = false;
 
     /**
+     * Set to `true` if the loader should be used to get the tile contents.
+     */
+    useGeometryLoader: boolean = false;
+
+    /**
      * The unique name of a `DataSource` instance.
      */
     name: string;
+
+    /**
+     * Whether the datasource should have a ground plane (this plane covers the tile entirely and
+     * has the minimum possible renderOrder), this can be required in some cases when fallback
+     * parent tiles need to be covered by the children, otherwise the content will overlap.
+     * Default is false
+     */
+    addGroundPlane: boolean = false;
 
     /**
      * The [[MapView]] instance holding a reference to this `DataSource`.
@@ -56,6 +69,11 @@ export abstract class DataSource extends THREE.EventDispatcher {
      * Maximum zoom level this `DataSource` can be displayed in.
      */
     private m_maxZoomLevel: number = 20;
+
+    /**
+     * Current value of [[maxGeometryHeight]] property.
+     */
+    private m_maxGeometryHeight = 0;
 
     /**
      * Storage level offset applied to this `DataSource`.
@@ -107,17 +125,13 @@ export abstract class DataSource extends THREE.EventDispatcher {
 
     /**
      * Sets the name of the [[StyleSet]] to use for the decoding. If this [[DataSource]] is already
-     * attached to a [[MapView]], this setter then looks for a [[StyleSet]] with this name and
-     * applies it.
+     * attached to a [[MapView]], this setter then reapplies [[StyleSet]] with this name found in
+     * [[MapView]]s theme.
      */
     set styleSetName(styleSetName: string | undefined) {
         this.m_styleSetName = styleSetName;
-        if (
-            this.m_mapView !== undefined &&
-            styleSetName !== undefined &&
-            this.m_mapView.theme.styles !== undefined
-        ) {
-            this.setStyleSet(this.m_mapView.theme.styles[styleSetName]);
+        if (this.m_mapView !== undefined && styleSetName !== undefined) {
+            this.setTheme(this.m_mapView.theme);
         }
     }
 
@@ -204,13 +218,27 @@ export abstract class DataSource extends THREE.EventDispatcher {
     /**
      * Invoked by [[MapView]] to notify when the [[Theme]] has been changed.
      *
-     * If `DataSource` depends on a theme, it must update its tiles' geometry.
+     * If `DataSource` depends on a `styleSet` or `languages`, it must update its tiles' geometry.
+     *
+     * @deprecated, Use [[setTheme]].
      *
      * @param styleSet The new theme that [[MapView]] uses.
      * @param languages An optional list of languages for the `DataSource`.
      */
     // tslint:disable-next-line:no-unused-variable
-    setStyleSet(styleSet?: StyleSet, languages?: string[]): void {
+    setStyleSet(styleSet?: StyleSet, definitions?: Definitions, languages?: string[]): void {
+        // to be overwritten by subclasses
+    }
+
+    /**
+     * Apply the [[Theme]] to this data source.
+     *
+     * If `DataSource` depends on a `styleSet` defined by this theme or `languages`, it must update
+     * its tiles' geometry.
+     *
+     * @param languages
+     */
+    setTheme(theme: Theme, languages?: string[]): void {
         // to be overwritten by subclasses
     }
 
@@ -279,6 +307,20 @@ export abstract class DataSource extends THREE.EventDispatcher {
     }
 
     /**
+     * Maximum geometry height above ground level this `DataSource` can produce.
+     *
+     * Used in first stage of frustum culling before [[Tile.maxGeometryHeight]] data is available.
+     *
+     * @default 0.
+     */
+    get maxGeometryHeight() {
+        return this.m_maxGeometryHeight;
+    }
+    set maxGeometryHeight(value: number) {
+        this.m_maxGeometryHeight = value;
+    }
+
+    /**
      * The difference between storage level and display level of tile.
      *
      * Storage level offset is a value applied (added) to current zoom level giving
@@ -300,6 +342,16 @@ export abstract class DataSource extends THREE.EventDispatcher {
     }
 
     /**
+     * Enables or disables overlay of geometry on elevation. It must be overloaded by data sources
+     * supporting this feature.
+     *
+     * @param value True to enable, false to disable.
+     */
+    setEnableElevationOverlay(enable: boolean) {
+        // to be overloaded by subclasses
+    }
+
+    /**
      * Computes the zoom level to use for display.
      *
      * @param zoomLevel The zoom level of the [[MapView]].
@@ -314,14 +366,27 @@ export abstract class DataSource extends THREE.EventDispatcher {
     }
 
     /**
-     * Returns `true` if [[MapView]] should render the tile with given [[TileKey]] and zoom level.
+     * Returns `true` if [[DataSource]] can load tile with given [[TileKey]] and zoom level.
      *
      * @param zoomLevel The zoom level of the [[MapView]].
      * @param tileKey The unique identifier for a map tile.
-     * @returns `true` if the geometries created for the given [[TileKey]] should be rendered.
+     * @returns `true` if the tile for the given [[TileKey]] can be loaded.
      */
-    shouldRender(zoomLevel: number, tileKey: TileKey): boolean {
-        return tileKey.level === zoomLevel;
+    canGetTile(zoomLevel: number, tileKey: TileKey): boolean {
+        return tileKey.level <= zoomLevel;
+    }
+
+    /**
+     * Returns `true` if [[MapView]] should traverse tiles further with given [[TileKey]] and
+     * zoom level.
+     *
+     * @param zoomLevel The zoom level of the [[MapView]].
+     * @param tileKey The unique identifier for a map tile.
+     * @returns `true` if the subtiles of the given [[TileKey]] should be
+     * checked for collisions.
+     */
+    shouldSubdivide(zoomLevel: number, tileKey: TileKey): boolean {
+        return tileKey.level <= zoomLevel;
     }
 
     /**

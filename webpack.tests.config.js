@@ -12,9 +12,21 @@ const testResources = testResourceDirs.map(dir => {
     };
 });
 
-const harpFontResourcesPath = path.dirname(
-    require.resolve("@here/harp-fontcatalog/package.json")
+const harpMapThemePath = path.dirname(require.resolve("@here/harp-map-theme/package.json"));
+const harpDataSourceProtocolPath = path.dirname(
+    require.resolve("@here/harp-datasource-protocol/package.json")
 );
+const harpFontResourcesPath = path.dirname(require.resolve("@here/harp-fontcatalog/package.json"));
+
+const allTests = [
+    ...glob.sync("@here/*/test/**/*.ts"),
+    ...glob.sync("./test/performance/**/*.ts"),
+    ...glob.sync("./test/rendering/*.ts"),
+];
+
+const unitTests = allTests.filter(name => (name.indexOf("/rendering") === -1 && name.indexOf("/performance/") === -1));
+const performanceTests = allTests.filter(name => name.indexOf("/performance/") > -1);
+const renderingTests = allTests.filter(name => name.indexOf("/rendering/") > -1);
 
 const browserTestsConfig = {
     devtool: "source-map",
@@ -37,7 +49,9 @@ const browserTestsConfig = {
         ]
     },
     entry: {
-        test: glob.sync("@here/*/test/**/*.ts")
+        test: unitTests,
+        "performance-test": performanceTests,
+        "rendering-test": renderingTests
     },
     output: {
         path: path.join(__dirname, "dist/test"),
@@ -51,24 +65,58 @@ const browserTestsConfig = {
         }),
         new CopyWebpackPlugin([
             path.join(__dirname, "test/index.html"),
+            path.join(__dirname, "test/rendering.html"),
+            path.join(__dirname, "test/performance.html"),
             require.resolve("three/build/three.min.js"),
             require.resolve("mocha/mocha.js"),
             require.resolve("mocha/mocha.css"),
             require.resolve("mocha-webdriver-runner/dist/mocha-webdriver-client.js"),
             ...testResources,
+            path.join(harpMapThemePath, "resources/berlin*.json"),
+            {
+                from: path.join(harpMapThemePath, "resources/wests_textures"),
+                to: "resources/wests_textures",
+                toType: "dir"
+            },
+            {
+                from: path.join(harpDataSourceProtocolPath, "theme.schema.json"),
+                to: "./@here/harp-datasource-protocol",
+                toType: "dir"
+            },
             {
                 from: path.join(harpFontResourcesPath, "resources"),
                 to: "@here/harp-fontcatalog/resources"
+            },
+            {
+                from: "./test/resources/",
+                to: "dist/resources",
+                toType: "dir"
             }
         ])
     ],
-    externals: {
-        fs: "undefined",
-        three: "THREE",
-        typestring: "undefined"
-    },
+    externals: [
+        {
+            fs: "undefined",
+            perf_hooks: "undefined",
+            three: "THREE",
+            typescript: "undefined"
+        },
+        function(context, request, callback) {
+            return /three\.module\.js$/.test(request) ? callback(null, "THREE") : callback();
+        }
+    ],
     performance: {
         hints: false
+    },
+    devServer: {
+        before: function(app) {
+            require("ts-node/register");
+
+            const RenderingTestResultServer = require("./@here/harp-test-utils/lib/rendering/RenderingTestResultServer");
+            const basePath = "./rendering-test-results/";
+            RenderingTestResultServer.installMiddleware(app, basePath);
+        },
+        contentBase: "./test/"
     },
     stats: {
         all: false,

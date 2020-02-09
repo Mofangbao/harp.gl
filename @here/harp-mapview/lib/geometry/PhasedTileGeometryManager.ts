@@ -41,24 +41,33 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
         super(mapView);
     }
 
+    /** @override */
     initTile(tile: Tile): void {
-        tile.tileGeometryLoader = new PhasedTileGeometryLoader(
-            tile,
-            this.m_loadPhaseDefinitions,
-            this.m_basicGeometryKinds
-        );
+        if (tile.dataSource.useGeometryLoader) {
+            tile.tileGeometryLoader = new PhasedTileGeometryLoader(
+                tile,
+                this.m_loadPhaseDefinitions,
+                this.m_basicGeometryKinds
+            );
+        }
     }
 
+    /** @override */
     updateTiles(tiles: Tile[]): void {
-        if (this.mapView.isDynamicFrame) {
-            this.updateSomeTiles(tiles);
-        } else {
-            this.updateAllTilesTogether(tiles);
+        let needUpdate = this.mapView.isDynamicFrame
+            ? this.updateSomeTiles(tiles)
+            : this.updateAllTilesTogether(tiles);
+
+        if (this.m_tileUpdateCallback) {
+            for (const tile of tiles) {
+                this.m_tileUpdateCallback(tile);
+            }
         }
 
-        this.updateTileObjectVisibility(tiles);
+        // updateTileObjectVisibility() has always to be called.
+        needUpdate = this.updateTileObjectVisibility(tiles) || needUpdate;
 
-        if (!this.checkTilesFinished(tiles)) {
+        if (needUpdate || !this.checkTilesFinished(tiles)) {
             this.mapView.update();
         }
     }
@@ -78,28 +87,30 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
      *
      * @param {Tile[]} tiles
      */
-    private updateSomeTiles(tiles: Tile[]) {
+    private updateSomeTiles(tiles: Tile[]): boolean {
         let numTilesUpdated = 0;
 
         for (const tile of tiles) {
             const phasedGeometryLoader = tile.tileGeometryLoader as PhasedTileGeometryLoader;
 
-            if (
-                phasedGeometryLoader !== undefined &&
-                phasedGeometryLoader.update(
-                    this.enableFilterByKind ? this.enabledGeometryKinds : undefined,
-                    this.enableFilterByKind ? this.disabledGeometryKinds : undefined
-                )
-            ) {
-                numTilesUpdated++;
+            if (phasedGeometryLoader !== undefined) {
                 if (
-                    this.m_maxUpdatedTilePerFrame > 0 &&
-                    numTilesUpdated >= this.m_maxUpdatedTilePerFrame
+                    phasedGeometryLoader.update(
+                        this.enableFilterByKind ? this.enabledGeometryKinds : undefined,
+                        this.enableFilterByKind ? this.disabledGeometryKinds : undefined
+                    )
                 ) {
-                    break;
+                    numTilesUpdated++;
+                    if (
+                        this.m_maxUpdatedTilePerFrame > 0 &&
+                        numTilesUpdated >= this.m_maxUpdatedTilePerFrame
+                    ) {
+                        break;
+                    }
                 }
             }
         }
+        return numTilesUpdated > 0;
     }
 
     /**
@@ -109,8 +120,9 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
      *
      * @param {Tile[]} tiles
      */
-    private updateAllTilesTogether(tiles: Tile[]): void {
+    private updateAllTilesTogether(tiles: Tile[]): boolean {
         let lowestPhase: number | undefined;
+        let needUpdate = false;
 
         for (const tile of tiles) {
             const phasedGeometryLoader = tile.tileGeometryLoader as PhasedTileGeometryLoader;
@@ -125,8 +137,9 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
 
         if (lowestPhase !== undefined && lowestPhase < this.m_loadPhaseDefinitions.length) {
             const nextPhase = lowestPhase + 1;
-            this.updateTilesIfNeeded(tiles, nextPhase);
+            needUpdate = this.updateTilesIfNeeded(tiles, nextPhase);
         }
+        return needUpdate;
     }
 
     /**
@@ -134,16 +147,23 @@ export class PhasedTileGeometryManager extends TileGeometryManagerBase {
      *
      * @param {Tile[]} tiles
      */
-    private updateTilesIfNeeded(tiles: Tile[], toPhase: number) {
+    private updateTilesIfNeeded(tiles: Tile[], toPhase: number): boolean {
+        let needUpdate = false;
+
         for (const tile of tiles) {
             const phasedGeometryLoader = tile.tileGeometryLoader as PhasedTileGeometryLoader;
             if (phasedGeometryLoader !== undefined) {
-                phasedGeometryLoader.updateToPhase(
-                    toPhase,
-                    this.enableFilterByKind ? this.enabledGeometryKinds : undefined,
-                    this.enableFilterByKind ? this.disabledGeometryKinds : undefined
-                );
+                if (
+                    phasedGeometryLoader.updateToPhase(
+                        toPhase,
+                        this.enableFilterByKind ? this.enabledGeometryKinds : undefined,
+                        this.enableFilterByKind ? this.disabledGeometryKinds : undefined
+                    )
+                ) {
+                    needUpdate = true;
+                }
             }
         }
+        return needUpdate;
     }
 }

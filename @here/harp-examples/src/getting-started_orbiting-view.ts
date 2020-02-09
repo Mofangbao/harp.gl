@@ -4,17 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeoCoordinates } from "@here/harp-geoutils";
+import { GeoCoordinates, mercatorProjection, sphereProjection } from "@here/harp-geoutils";
 import {
     CopyrightElementHandler,
-    CopyrightInfo,
     MapView,
     MapViewEventNames,
     MapViewUtils
 } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import { GUI } from "dat.gui";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * In this example we simply use the `lookAt` method to make the camera orbit around a geolocation.
@@ -36,25 +35,27 @@ export namespace CameraOrbitExample {
     const map = createBaseMap();
     // end:harp_gl_camera_orbit_example_0.ts
 
+    // Be sure to see the buildings when starting the example: a zoom level does not translate into
+    // the same distance depending on the viewport's height.
+    const minDistanceForBuildings =
+        Math.ceil(MapViewUtils.calculateDistanceToGroundFromZoomLevel(map, 16.0)) - 500;
     // snippet:harp_gl_camera_orbit_example_1.ts
-    const options = { tilt: 45, distance: 3000 };
-    const NY = new GeoCoordinates(40.707, -74.012);
-    let azimuth = 0;
-    map.addEventListener(MapViewEventNames.Render, () => {
-        map.lookAt(NY, options.distance, options.tilt, (azimuth = (azimuth + 0.1) % 360));
+    const options = { tilt: 25, distance: minDistanceForBuildings, globe: true };
+    const dubai = new GeoCoordinates(25.19705, 55.27419);
+    let heading = 0;
+    map.addEventListener(MapViewEventNames.AfterRender, () => {
+        map.lookAt(dubai, options.distance, options.tilt, (heading = (heading + 0.1) % 360));
+        map.update();
         updateHTML();
     });
     // end:harp_gl_camera_orbit_example_1.ts
 
     const gui = new GUI({ width: 300 });
     gui.add(options, "tilt", 0, 80, 0.1);
-    gui.add(
-        options,
-        "distance",
-        MapViewUtils.calculateDistanceToGroundFromZoomLevel(map, map.maxZoomLevel),
-        5000,
-        1
-    );
+    gui.add(options, "distance", 300, 60000, 1);
+    gui.add(options, "globe").onChange(() => {
+        map.projection = options.globe ? sphereProjection : mercatorProjection;
+    });
 
     function createBaseMap(): MapView {
         document.body.innerHTML += getExampleHTML();
@@ -62,8 +63,10 @@ export namespace CameraOrbitExample {
         const canvas = document.getElementById("mapCanvas") as HTMLCanvasElement;
         const mapView = new MapView({
             canvas,
-            theme: "resources/berlin_tilezen_base.json"
+            projection: sphereProjection,
+            theme: "resources/berlin_tilezen_base_globe.json"
         });
+        canvas.addEventListener("contextmenu", e => e.preventDefault());
 
         CopyrightElementHandler.install("copyrightNotice", mapView);
 
@@ -73,21 +76,13 @@ export namespace CameraOrbitExample {
             mapView.resize(window.innerWidth, window.innerHeight);
         });
 
-        const hereCopyrightInfo: CopyrightInfo = {
-            id: "here.com",
-            year: new Date().getFullYear(),
-            label: "HERE",
-            link: "https://legal.here.com/terms"
-        };
-        const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
-
         const omvDataSource = new OmvDataSource({
             baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
             apiFormat: APIFormat.XYZOMV,
             styleSetName: "tilezen",
             maxZoomLevel: 17,
             authenticationCode: accessToken,
-            copyrightInfo: copyrights
+            copyrightInfo
         });
         mapView.addDataSource(omvDataSource);
 
@@ -97,8 +92,8 @@ export namespace CameraOrbitExample {
     function updateHTML() {
         const infoElement = document.getElementById("info") as HTMLParagraphElement;
         infoElement.innerHTML =
-            `This view is set through the lookAt method: map.lookAt(NY, ` +
-            `${options.distance.toFixed(0)}, ${options.tilt.toFixed(1)}, ${azimuth.toFixed(1)});`;
+            `This view is set through the lookAt method: map.lookAt(dubai, ` +
+            `${options.distance.toFixed(0)}, ${options.tilt.toFixed(1)}, ${heading.toFixed(1)});`;
     }
 
     function getExampleHTML() {
@@ -110,8 +105,6 @@ export namespace CameraOrbitExample {
                 #info{
                     color: #fff;
                     width: 80%;
-                    text-align: center;
-                    font-family: monospace;
                     left: 50%;
                     position: relative;
                     margin: 10px 0 0 -40%;

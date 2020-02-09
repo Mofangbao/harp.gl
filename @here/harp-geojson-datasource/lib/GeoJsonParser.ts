@@ -5,14 +5,15 @@
  */
 
 import {
+    AttributeMap,
     ExtendedTileInfo,
     ExtendedTileInfoWriter,
     Feature,
     FeatureDetails,
+    FeatureGroupType,
     GeoJson,
     IndexedTechnique,
     isCirclesTechnique,
-    isDashedLineTechnique,
     isFillTechnique,
     isPoiTechnique,
     isSolidLineTechnique,
@@ -20,7 +21,12 @@ import {
     isTextTechnique,
     LineFeatureGroup
 } from "@here/harp-datasource-protocol";
-import { MapEnv, StyleSetEvaluator, Value } from "@here/harp-datasource-protocol/index-decoder";
+import {
+    MapEnv,
+    StyleSetEvaluator,
+    Value,
+    ValueMap
+} from "@here/harp-datasource-protocol/index-decoder";
 
 import { GeoCoordinates, Projection } from "@here/harp-geoutils";
 import { LoggerManager } from "@here/harp-utils";
@@ -35,7 +41,7 @@ const logger = LoggerManager.instance.create("GeoJsonFeatureParser");
 export interface PolygonsData {
     vertices: number[];
     holes: number[];
-    geojsonProperties?: {};
+    geojsonProperties: AttributeMap;
 }
 
 /**
@@ -43,7 +49,7 @@ export interface PolygonsData {
  */
 interface PointsData {
     vertices: number[];
-    geojsonProperties: Array<{} | undefined>;
+    geojsonProperties: AttributeMap[];
 }
 
 /**
@@ -52,7 +58,7 @@ interface PointsData {
  */
 interface LinesData {
     vertices: number[][];
-    geojsonProperties: Array<{} | undefined>;
+    geojsonProperties: AttributeMap[];
 }
 
 /**
@@ -268,18 +274,6 @@ export class GeoJsonParser {
                             buffers.textPathGeometryBuffer,
                             feature.properties
                         );
-                    } else if (isDashedLineTechnique(technique)) {
-                        this.processDashedLines(
-                            extendedTile,
-                            [feature.geometry.coordinates],
-                            center,
-                            projection,
-                            techniqueIndex,
-                            styleSetEvaluator,
-                            buffers.geometryBuffer,
-                            feature.id,
-                            feature.properties
-                        );
                     }
                 }
                 break;
@@ -399,7 +393,7 @@ export class GeoJsonParser {
         projection: Projection,
         techniqueIndex: number,
         geometryBuffer: Map<number, GeometryData>,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
         buffer.type = "point";
@@ -428,7 +422,7 @@ export class GeoJsonParser {
         styleSetEvaluator: StyleSetEvaluator,
         geometryBuffer: Map<number, GeometryData>,
         featureId?: string,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
         buffer.type = "solid-line";
@@ -459,73 +453,14 @@ export class GeoJsonParser {
         if (featureId !== undefined) {
             featureDetails.featureId = featureId;
         }
+        const env = new MapEnv({ type: "line", ...(featureDetails as ValueMap) });
 
-        const env = new MapEnv({ type: "line", ...featureDetails });
         const techniques = styleSetEvaluator.getMatchingTechniques(env);
         const featureIdNumber = 0; //geojsonTile do not have an integer for the featureId. Use 0.
         if (buffer.lines.vertices.length !== buffer.lines.geojsonProperties.length) {
             logger.log("The amount of lines and the amount of geo properties has to be the same");
             return;
         }
-        this.addTileInfo(
-            extendedTile,
-            techniques,
-            buffer.lines.vertices,
-            featureIdNumber,
-            env,
-            buffer.lines.geojsonProperties
-        );
-    }
-
-    private static processDashedLines(
-        extendedTile: ExtendedTile,
-        lines: number[][][],
-        center: THREE.Vector3,
-        projection: Projection,
-        techniqueIndex: number,
-        styleSetEvaluator: StyleSetEvaluator,
-        geometryBuffer: Map<number, GeometryData>,
-        featureId?: string,
-        geojsonProperties?: {}
-    ): void {
-        const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
-        buffer.type = "dashed-line";
-
-        for (const line of lines) {
-            buffer.lines.geojsonProperties.push(geojsonProperties);
-            const vertices: number[] = [];
-            for (const point of line) {
-                if (point === null || point[0] === null || point[0] === undefined) {
-                    return;
-                }
-                this.m_cached_geoCoord.latitude = point[1];
-                this.m_cached_geoCoord.longitude = point[0];
-                projection
-                    .projectPoint(this.m_cached_geoCoord, this.m_cached_worldCoord)
-                    .sub(center);
-                vertices.push(
-                    this.m_cached_worldCoord.x,
-                    this.m_cached_worldCoord.y,
-                    this.m_cached_worldCoord.z
-                );
-            }
-
-            buffer.lines.vertices.push(vertices);
-        }
-
-        const featureDetails: FeatureDetails = {};
-        if (featureId !== undefined) {
-            featureDetails.featureId = featureId;
-        }
-
-        const env = new MapEnv({ type: "line", ...featureDetails });
-        const techniques = styleSetEvaluator.getMatchingTechniques(env);
-        const featureIdNumber = 0; //geojsonTile do not have an integer for the featureId. Use 0.
-        if (buffer.lines.vertices.length !== buffer.lines.geojsonProperties.length) {
-            logger.log("The amount of lines and the amount of geo properties has to be the same");
-            return;
-        }
-
         this.addTileInfo(
             extendedTile,
             techniques,
@@ -543,7 +478,7 @@ export class GeoJsonParser {
         techniqueIndex: number,
         geometryBuffer: Map<number, GeometryData>,
         isPolygonOutlines: boolean,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, geometryBuffer);
         buffer.type = isPolygonOutlines ? "outline" : "polygon";
@@ -592,7 +527,7 @@ export class GeoJsonParser {
         techniqueIndex: number,
         labelProperty: string,
         textPathGeometryBuffer: Map<number, GeometryData>,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, textPathGeometryBuffer);
         buffer.type = "text-path";
@@ -625,7 +560,7 @@ export class GeoJsonParser {
         techniqueIndex: number,
         labelProperty: string,
         textGeometryBuffer: Map<number, GeometryData>,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, textGeometryBuffer);
         buffer.type = "point";
@@ -670,7 +605,7 @@ export class GeoJsonParser {
         techniqueIndex: number,
         labelProperty: string,
         textGeometryBuffer: Map<number, GeometryData>,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, textGeometryBuffer);
         buffer.type = "text";
@@ -697,7 +632,7 @@ export class GeoJsonParser {
         projection: Projection,
         techniqueIndex: number,
         poiGeometryBuffer: Map<number, GeometryData>,
-        geojsonProperties?: {}
+        geojsonProperties: AttributeMap = {}
     ): void {
         const buffer = this.findOrCreateGeometryBuffer(techniqueIndex, poiGeometryBuffer);
         buffer.type = "poi";
@@ -724,7 +659,7 @@ export class GeoJsonParser {
     ): number[] {
         const featureDetails: FeatureDetails = Flattener.flatten(feature.properties, "properties");
         featureDetails.featureId = feature.id;
-        const env = new MapEnv({ type: envType, ...featureDetails });
+        const env = new MapEnv({ type: envType, ...(featureDetails as ValueMap) });
         const techniques = styleSetEvaluator.getMatchingTechniques(env);
         return techniques.map(technique => {
             return technique._index;
@@ -744,6 +679,7 @@ export class GeoJsonParser {
             return;
         }
         const tileInfoWriter = extendedTile.writer;
+
         for (const technique of techniques) {
             if (technique === undefined) {
                 continue;
@@ -763,13 +699,14 @@ export class GeoJsonParser {
 
                 currentGeoJsonIndex++;
 
+                const featureText = ExtendedTileInfo.getFeatureText(env, technique);
                 tileInfoWriter.addFeature(
                     extendedTile.info.lineGroup,
-                    technique,
                     env,
                     featureId,
+                    featureText,
                     infoTileTechniqueIndex,
-                    false
+                    FeatureGroupType.Line
                 );
 
                 tileInfoWriter.addFeaturePoints(extendedTile.info.lineGroup, aLine);

@@ -112,7 +112,7 @@ export class TextGeometry {
             new Float32Array(this.m_currentCapacity * QUAD_VERTEX_MEMORY_FOOTPRINT),
             VERTEX_BUFFER_STRIDE
         );
-        this.m_vertexBuffer.setDynamic(true);
+        this.m_vertexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_positionAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 0);
         this.m_uvAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 4);
         this.m_colorAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 8);
@@ -122,13 +122,13 @@ export class TextGeometry {
             new Uint32Array(this.m_currentCapacity * QUAD_INDEX_MEMORY_FOOTPRINT),
             INDEX_BUFFER_STRIDE
         );
-        this.m_indexBuffer.setDynamic(true);
+        this.m_indexBuffer.setUsage(THREE.DynamicDrawUsage);
 
         this.m_geometry = new THREE.BufferGeometry();
-        this.m_geometry.addAttribute("position", this.m_positionAttribute);
-        this.m_geometry.addAttribute("uv", this.m_uvAttribute);
-        this.m_geometry.addAttribute("color", this.m_colorAttribute);
-        this.m_geometry.addAttribute("bgColor", this.m_bgColorAttribute);
+        this.m_geometry.setAttribute("position", this.m_positionAttribute);
+        this.m_geometry.setAttribute("uv", this.m_uvAttribute);
+        this.m_geometry.setAttribute("color", this.m_colorAttribute);
+        this.m_geometry.setAttribute("bgColor", this.m_bgColorAttribute);
         this.m_geometry.setIndex(this.m_indexBuffer);
 
         this.m_pickingDataArray = new Array(this.m_currentCapacity);
@@ -137,6 +137,8 @@ export class TextGeometry {
         this.m_bgMesh = new THREE.Mesh(this.m_geometry, backgroundMaterial);
         this.m_mesh.renderOrder = Number.MAX_SAFE_INTEGER;
         this.m_bgMesh.renderOrder = Number.MAX_SAFE_INTEGER - 1;
+        this.m_mesh.frustumCulled = false;
+        this.m_bgMesh.frustumCulled = false;
         this.scene.add(this.m_bgMesh, this.m_mesh);
     }
 
@@ -523,7 +525,7 @@ export class TextGeometry {
         const newVertexBuffer = new Float32Array(size * QUAD_VERTEX_MEMORY_FOOTPRINT);
         newVertexBuffer.set(this.m_vertexBuffer.array);
         this.m_vertexBuffer = new THREE.InterleavedBuffer(newVertexBuffer, VERTEX_BUFFER_STRIDE);
-        this.m_vertexBuffer.setDynamic(true);
+        this.m_vertexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_positionAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 0);
         this.m_uvAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 4);
         this.m_colorAttribute = new THREE.InterleavedBufferAttribute(this.m_vertexBuffer, 4, 8);
@@ -532,14 +534,14 @@ export class TextGeometry {
         const newIndexBuffer = new Uint32Array(size * QUAD_INDEX_MEMORY_FOOTPRINT);
         newIndexBuffer.set(this.m_indexBuffer.array);
         this.m_indexBuffer = new THREE.BufferAttribute(newIndexBuffer, INDEX_BUFFER_STRIDE);
-        this.m_indexBuffer.setDynamic(true);
+        this.m_indexBuffer.setUsage(THREE.DynamicDrawUsage);
 
         this.m_geometry.dispose();
         this.m_geometry = new THREE.BufferGeometry();
-        this.m_geometry.addAttribute("position", this.m_positionAttribute);
-        this.m_geometry.addAttribute("uv", this.m_uvAttribute);
-        this.m_geometry.addAttribute("color", this.m_colorAttribute);
-        this.m_geometry.addAttribute("bgColor", this.m_bgColorAttribute);
+        this.m_geometry.setAttribute("position", this.m_positionAttribute);
+        this.m_geometry.setAttribute("uv", this.m_uvAttribute);
+        this.m_geometry.setAttribute("color", this.m_colorAttribute);
+        this.m_geometry.setAttribute("bgColor", this.m_bgColorAttribute);
         this.m_geometry.setIndex(this.m_indexBuffer);
 
         this.m_pickingDataArray.length = this.m_currentCapacity;
@@ -549,6 +551,8 @@ export class TextGeometry {
         this.m_bgMesh = new THREE.Mesh(this.m_geometry, this.m_bgMesh.material);
         this.m_mesh.renderOrder = Number.MAX_SAFE_INTEGER;
         this.m_bgMesh.renderOrder = Number.MAX_SAFE_INTEGER - 1;
+        this.m_mesh.frustumCulled = false;
+        this.m_bgMesh.frustumCulled = false;
         this.scene.add(this.m_bgMesh, this.m_mesh);
     }
 }

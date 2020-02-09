@@ -12,11 +12,10 @@ import {
 } from "@here/harp-datasource-protocol";
 
 import { StyleSetEvaluator } from "@here/harp-datasource-protocol/index-decoder";
-import { Projection, TileKey, webMercatorTilingScheme } from "@here/harp-geoutils";
+import { OrientedBox3, Projection, TileKey, webMercatorTilingScheme } from "@here/harp-geoutils";
 import { ThemedTileDecoder, WorkerServiceManager } from "@here/harp-mapview-decoder/index-worker";
 import { TileDecoderService } from "@here/harp-mapview-decoder/lib/TileDecoderService";
 import { LoggerManager } from "@here/harp-utils";
-import * as THREE from "three";
 import { GeoJsonGeometryCreator, GeoJsonTileGeometries } from "./GeoJsonGeometryCreator";
 import { ExtendedTile } from "./GeoJsonParser";
 
@@ -57,6 +56,7 @@ export class GeoJsonTileDecoder extends ThemedTileDecoder {
 
     /**
      *
+     *@override
      */
     connect(): Promise<void> {
         return Promise.resolve();
@@ -70,6 +70,7 @@ export class GeoJsonTileDecoder extends ThemedTileDecoder {
      * @param styleSetEvaluator The [[StyleSetEvaluator]] that reads the style and apply it to the
      *      meshes.
      * @param projection The current camera projection.
+     * @override
      */
     decodeThemedTile(
         data: GeoJson,
@@ -111,6 +112,7 @@ class GeoJsonDecoder {
         const tileInfo = new ExtendedTileInfo(tileKey, this.m_storeExtendedTags);
         const tileInfoWriter = new ExtendedTileInfoWriter(tileInfo, this.m_storeExtendedTags);
 
+        this.m_styleSetEvaluator.resetTechniques();
         const extendedTile = {
             info: tileInfo,
             writer: tileInfoWriter
@@ -142,15 +144,16 @@ class GeoJsonDecoder {
             tile.textPathGeometries = geometries.textPathGeometries;
         }
 
+        // HARP-7419: TODO, support tile.pathGeometries, not currently needed, but may be needed
+        // in future.
+
         return tile;
     }
 
     private getTileCenter(tileKey: TileKey) {
         const geoBox = webMercatorTilingScheme.getGeoBox(tileKey);
-        const tileBounds = this.m_projection.projectBox(geoBox, new THREE.Box3());
-        const center = new THREE.Vector3();
-        tileBounds.getCenter(center);
-        return center;
+        const tileBounds = this.m_projection.projectBox(geoBox, new OrientedBox3());
+        return tileBounds.position;
     }
 
     private getTileInfo(extendedTile: ExtendedTile): ExtendedTileInfo {

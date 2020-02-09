@@ -7,87 +7,79 @@ import {
     BaseTechniqueParams,
     BufferAttribute,
     DecodedTile,
+    Expr,
     ExtrudedPolygonTechnique,
     FillTechnique,
     Geometry,
     GeometryKind,
     GeometryKindSet,
     getArrayConstructor,
+    getFeatureId,
     getPropertyValue,
     isCirclesTechnique,
-    isDashedLineTechnique,
     isExtrudedLineTechnique,
     isExtrudedPolygonTechnique,
     isFillTechnique,
-    isInterpolatedProperty,
+    isLineMarkerTechnique,
     isLineTechnique,
+    isPoiTechnique,
     isSegmentsTechnique,
     isSolidLineTechnique,
     isSquaresTechnique,
     isTerrainTechnique,
     isTextTechnique,
-    LineMarkerTechnique,
+    MakeTechniqueAttrs,
     needsVertexNormals,
-    PoiTechnique,
     SolidLineTechnique,
     StandardExtrudedLineTechnique,
     Technique,
-    TextPathGeometry,
-    TextTechnique
+    TerrainTechnique,
+    TextPathGeometry
 } from "@here/harp-datasource-protocol";
 // tslint:disable:max-line-length
 import { SphericalGeometrySubdivisionModifier } from "@here/harp-geometry/lib/SphericalGeometrySubdivisionModifier";
 import { EarthConstants, GeoCoordinates, ProjectionType } from "@here/harp-geoutils";
 import {
-    DashedLineMaterial,
     EdgeMaterial,
     EdgeMaterialParameters,
     FadingFeature,
+    isHighPrecisionLineMaterial,
     MapMeshBasicMaterial,
     MapMeshStandardMaterial,
+    setShaderMaterialDefine,
     SolidLineMaterial
 } from "@here/harp-materials";
-import {
-    ContextualArabicConverter,
-    FontStyle,
-    FontUnit,
-    FontVariant,
-    HorizontalAlignment,
-    TextLayoutStyle,
-    TextRenderStyle,
-    VerticalAlignment,
-    WrappingMode
-} from "@here/harp-text-canvas";
-import { getOptionValue } from "@here/harp-utils";
+import { ContextualArabicConverter } from "@here/harp-text-canvas";
+import { assert, LoggerManager } from "@here/harp-utils";
 import * as THREE from "three";
 
-import { logger } from "@here/harp-datasource-protocol/index-decoder";
 import { AnimatedExtrusionTileHandler } from "../AnimatedExtrusionHandler";
 import { ColorCache } from "../ColorCache";
-import { createMaterial, getBufferAttribute, getObjectConstructor } from "../DecodedTileHelpers";
+import {
+    applyBaseColorToMaterial,
+    applySecondaryColorToMaterial,
+    compileTechniques,
+    createMaterial,
+    getBufferAttribute,
+    getObjectConstructor
+} from "../DecodedTileHelpers";
 import {
     createDepthPrePassMesh,
     isRenderDepthPrePassEnabled,
     setDepthPrePassStencil
 } from "../DepthPrePass";
+import { DisplacementMap, TileDisplacementMap } from "../DisplacementMap";
+import { FALLBACK_RENDER_ORDER_OFFSET } from "../MapView";
 import { MapViewPoints } from "../MapViewPoints";
+import { PathBlockingElement } from "../PathBlockingElement";
 import { TextElement } from "../text/TextElement";
 import { DEFAULT_TEXT_DISTANCE_SCALE } from "../text/TextElementsRenderer";
-import { computeStyleCacheId } from "../text/TextStyleCache";
 import { Tile, TileFeatureData } from "../Tile";
+import { TileGeometryLoader } from "./TileGeometryLoader";
 
-/**
- * The SORT_WEIGHT_PATH_LENGTH constants control how the priority of the labels are computed based
- * on the length of the label strings.
- *
- * Consequently, the [[Technique]]s priority is slightly modified while generating
- * [[TextElement]]s from the [[DecodedTile]], to get a more meaningful priority and stable results.
- */
-
-/**
- * Gives [[TextElement]]s with longer paths a higher priority.
- */
-const SORT_WEIGHT_PATH_LENGTH = 0.1;
+const logger = LoggerManager.instance.create("TileGeometryCreator");
+const tmpVector3 = new THREE.Vector3();
+const tmpVector2 = new THREE.Vector2();
 
 /**
  * Parameters that control fading.
@@ -111,11 +103,6 @@ export interface PolygonFadingParameters extends FadingParameters {
  * Support class to create geometry for a [[Tile]] from a [[DecodedTile]].
  */
 export class TileGeometryCreator {
-    /**
-     * Cache for named colors.
-     */
-    private static m_colorMap: Map<string, THREE.Color> = new Map();
-
     private static m_instance: TileGeometryCreator;
 
     /**
@@ -184,6 +171,9 @@ export class TileGeometryCreator {
                 group.createdOffsets = [];
             }
         }
+
+        // compile the dynamic expressions.
+        compileTechniques(decodedTile.techniques);
     }
 
     /**
@@ -196,10 +186,84 @@ export class TileGeometryCreator {
      * @param decodedTile The decodedTile containing the actual tile map data.
      */
     createAllGeometries(tile: Tile, decodedTile: DecodedTile) {
-        tile.clear();
+        const filter = (technique: Technique): boolean => {
+            return technique.enabled !== false;
+        };
+
+        if (decodedTile.maxGeometryHeight !== undefined) {
+            tile.maxGeometryHeight = decodedTile.maxGeometryHeight;
+        }
+        this.createObjects(tile, decodedTile, filter);
+
         this.preparePois(tile, decodedTile);
-        this.createTextElements(tile, decodedTile);
-        this.createObjects(tile, decodedTile);
+
+        // TextElements do not get their geometry created by Tile, but are managed on a
+        // higher level.
+        const textFilter = (technique: Technique): boolean => {
+            if (
+                !isPoiTechnique(technique) &&
+                !isLineMarkerTechnique(technique) &&
+                !isTextTechnique(technique)
+            ) {
+                return false;
+            }
+            return filter(technique);
+        };
+        this.createTextElements(tile, decodedTile, textFilter);
+
+        this.createLabelRejectionElements(tile, decodedTile);
+
+        // HARP-7899, disable ground plane for globe
+        if (tile.dataSource.addGroundPlane && tile.projection.type === ProjectionType.Planar) {
+            // The ground plane is required for when we change the zoom back and we fall back to the
+            // parent, in that case we reduce the renderOrder of the parent tile and this ground
+            // place ensures that parent doesn't come through. This value must be above the
+            // renderOrder of all objects in the fallback tile, otherwise there won't be a proper
+            // covering of the parent tile by the children, hence dividing by 2. To put a bit more
+            // concretely, we assume all objects are rendered with a renderOrder between 0 and
+            // FALLBACK_RENDER_ORDER_OFFSET / 2, i.e. 10000. The ground plane is put at -10000, and
+            // the fallback tiles have their renderOrder set between -20000 and -10000
+            TileGeometryCreator.instance.addGroundPlane(tile, -FALLBACK_RENDER_ORDER_OFFSET / 2);
+        }
+    }
+
+    createLabelRejectionElements(tile: Tile, decodedTile: DecodedTile) {
+        if (decodedTile.pathGeometries === undefined) {
+            return;
+        }
+        for (const path of decodedTile.pathGeometries) {
+            tile.addBlockingElement(new PathBlockingElement(path.path));
+        }
+    }
+
+    /**
+     * Apply enabled and disabled kinds as a filter.
+     *
+     * @param {DecodedTile} decodedTile
+     * @param {(GeometryKindSet | undefined)} enabledKinds
+     * @param {(GeometryKindSet | undefined)} disabledKinds
+     */
+    processTechniques(
+        decodedTile: DecodedTile,
+        enabledKinds: GeometryKindSet | undefined,
+        disabledKinds: GeometryKindSet | undefined
+    ): void {
+        if (decodedTile === undefined) {
+            return;
+        }
+
+        for (const technique of decodedTile.techniques) {
+            // Make sure that all technique have their geometryKind set, either from the Theme or
+            // their default value.
+            if (technique.kind === undefined) {
+                TileGeometryLoader.setDefaultGeometryKind(technique);
+            }
+        }
+
+        // Speedup and simplify following code: Test all techniques if they intersect with
+        // enabledKinds and disabledKinds, in which case they are flagged. The disabledKinds can be
+        // ignored hereafter.
+        this.initDecodedTile(decodedTile, enabledKinds, disabledKinds);
     }
 
     /**
@@ -216,7 +280,10 @@ export class TileGeometryCreator {
         object: THREE.Object3D,
         geometryKind: GeometryKind | GeometryKindSet | undefined
     ) {
-        const userData = object.userData || {};
+        if (object.userData === undefined) {
+            object.userData = {};
+        }
+        const userData = object.userData;
         userData.tileKey = tile.tileKey;
         userData.dataSource = tile.dataSource.name;
 
@@ -245,15 +312,7 @@ export class TileGeometryCreator {
         textFilter?: (technique: Technique) => boolean
     ): TextPathGeometry[] {
         const processedPaths = new Array<TextPathGeometry>();
-
-        const MAX_CORNER_ANGLE = Math.PI / 8;
-
         const newPaths = textPathGeometries.slice();
-
-        // maximum reuse of variables to reduce allocations
-        const p0 = new THREE.Vector2();
-        const p1 = new THREE.Vector2();
-        const previousTangent = new THREE.Vector2();
 
         while (newPaths.length > 0) {
             const textPath = newPaths.pop();
@@ -270,56 +329,7 @@ export class TileGeometryCreator {
                 continue;
             }
 
-            let splitIndex = -1;
-
-            for (let i = 0; i < textPath.path.length - 3; i += 3) {
-                p0.set(textPath.path[i], textPath.path[i + 1]);
-                p1.set(textPath.path[i + 3], textPath.path[i + 4]);
-                const tangent = p1.sub(p0).normalize();
-
-                if (i > 0) {
-                    const theta = Math.atan2(
-                        previousTangent.x * tangent.y - tangent.x * previousTangent.y,
-                        tangent.dot(previousTangent)
-                    );
-
-                    if (Math.abs(theta) > MAX_CORNER_ANGLE) {
-                        splitIndex = i;
-                        break;
-                    }
-                }
-                previousTangent.set(tangent.x, tangent.y);
-            }
-
-            if (splitIndex > 0) {
-                // split off the valid first path points with a clone of the path
-                const firstTextPath = {
-                    path: textPath.path.slice(0, splitIndex + 3),
-                    text: textPath.text,
-                    // Used for placement priorities only, can be kept although it could also be
-                    // recomputed
-                    pathLengthSqr: textPath.pathLengthSqr,
-                    technique: textPath.technique,
-                    featureId: textPath.featureId
-                };
-
-                processedPaths.push(firstTextPath);
-
-                // setup a second part with the rest of the path points and process again
-                const secondTextPath = {
-                    path: textPath.path.slice(splitIndex),
-                    text: textPath.text,
-                    // Used for placement priorities only, can be kept although it could also be
-                    // recomputed
-                    pathLengthSqr: textPath.pathLengthSqr,
-                    technique: textPath.technique,
-                    featureId: textPath.featureId
-                };
-
-                newPaths.push(secondTextPath);
-            } else {
-                processedPaths.push(textPath);
-            }
+            processedPaths.push(textPath);
         }
         return processedPaths;
     }
@@ -339,27 +349,16 @@ export class TileGeometryCreator {
         textFilter?: (technique: Technique) => boolean
     ) {
         const mapView = tile.mapView;
+        const textElementsRenderer = mapView.textElementsRenderer;
         const displayZoomLevel = Math.floor(mapView.zoomLevel);
+        const worldOffsetX = tile.computeWorldOffsetX();
+
         if (decodedTile.textPathGeometries !== undefined) {
             const textPathGeometries = this.prepareTextPaths(
                 decodedTile.textPathGeometries,
                 decodedTile,
                 textFilter
             );
-
-            // Compute maximum street length (squared). Longer streets should be labelled first,
-            // they have a higher chance of being placed in case the number of text elements is
-            // limited.
-            let maxPathLengthSqr = 0;
-            for (const textPath of textPathGeometries) {
-                const technique = decodedTile.techniques[textPath.technique];
-                if (technique.enabled === false || !isTextTechnique(technique)) {
-                    continue;
-                }
-                if (textPath.pathLengthSqr > maxPathLengthSqr) {
-                    maxPathLengthSqr = textPath.pathLengthSqr;
-                }
-            }
 
             for (const textPath of textPathGeometries) {
                 const technique = decodedTile.techniques[textPath.technique];
@@ -376,21 +375,18 @@ export class TileGeometryCreator {
                 for (let i = 0; i < textPath.path.length; i += 3) {
                     path.push(
                         new THREE.Vector3(
-                            textPath.path[i],
+                            textPath.path[i] + worldOffsetX,
                             textPath.path[i + 1],
                             textPath.path[i + 2]
                         )
                     );
                 }
 
-                // Make sorting stable and make pathLengthSqr a differentiator for placement.
+                // Make sorting stable.
                 const priority =
-                    (technique.priority !== undefined
+                    technique.priority !== undefined
                         ? getPropertyValue(technique.priority, displayZoomLevel)
-                        : 0) +
-                    (maxPathLengthSqr > 0
-                        ? (SORT_WEIGHT_PATH_LENGTH * textPath.pathLengthSqr) / maxPathLengthSqr
-                        : 0);
+                        : 0;
                 const fadeNear =
                     technique.fadeNear !== undefined
                         ? getPropertyValue(technique.fadeNear, displayZoomLevel)
@@ -399,20 +395,23 @@ export class TileGeometryCreator {
                     technique.fadeFar !== undefined
                         ? getPropertyValue(technique.fadeFar, displayZoomLevel)
                         : technique.fadeFar;
-
+                const userData = textPath.objInfos;
+                const featureId = getFeatureId(userData);
                 const textElement = new TextElement(
                     ContextualArabicConverter.instance.convert(textPath.text),
                     path,
-                    this.getRenderStyle(tile, technique),
-                    this.getLayoutStyle(tile, technique),
+                    textElementsRenderer.styleCache.getRenderStyle(tile, technique),
+                    textElementsRenderer.styleCache.getLayoutStyle(tile, technique),
                     priority,
                     technique.xOffset !== undefined ? technique.xOffset : 0.0,
                     technique.yOffset !== undefined ? technique.yOffset : 0.0,
-                    textPath.featureId,
+                    featureId,
                     technique.style,
                     fadeNear,
-                    fadeFar
+                    fadeFar,
+                    tile.offset
                 );
+                textElement.pathLengthSqr = textPath.pathLengthSqr;
                 textElement.minZoomLevel =
                     technique.minZoomLevel !== undefined
                         ? technique.minZoomLevel
@@ -428,6 +427,8 @@ export class TileGeometryCreator {
                 textElement.mayOverlap = technique.mayOverlap === true;
                 textElement.reserveSpace = technique.reserveSpace !== false;
                 textElement.kind = technique.kind;
+                // Get the userData for text element picking.
+                textElement.userData = textPath.objInfos;
 
                 tile.addTextElement(textElement);
             }
@@ -473,7 +474,7 @@ export class TileGeometryCreator {
                         : technique.fadeFar;
 
                 for (let i = 0; i < numPositions; ++i) {
-                    const x = positions.getX(i);
+                    const x = positions.getX(i) + worldOffsetX;
                     const y = positions.getY(i);
                     const z = positions.getZ(i);
                     const label = text.stringCatalog[text.texts[i]];
@@ -482,16 +483,22 @@ export class TileGeometryCreator {
                         continue;
                     }
 
+                    const userData = text.objInfos !== undefined ? text.objInfos[i] : undefined;
+                    const featureId = getFeatureId(userData);
+
                     const textElement = new TextElement(
                         ContextualArabicConverter.instance.convert(label!),
                         new THREE.Vector3(x, y, z),
-                        this.getRenderStyle(tile, technique),
-                        this.getLayoutStyle(tile, technique),
+                        textElementsRenderer.styleCache.getRenderStyle(tile, technique),
+                        textElementsRenderer.styleCache.getLayoutStyle(tile, technique),
                         priority,
                         technique.xOffset || 0.0,
                         technique.yOffset || 0.0,
-                        text.featureId,
-                        technique.style
+                        featureId,
+                        technique.style,
+                        undefined,
+                        undefined,
+                        tile.offset
                     );
 
                     textElement.minZoomLevel =
@@ -508,6 +515,9 @@ export class TileGeometryCreator {
 
                     textElement.fadeNear = fadeNear;
                     textElement.fadeFar = fadeFar;
+
+                    // Get the userData for text element picking.
+                    textElement.userData = userData;
 
                     tile.addTextElement(textElement);
                 }
@@ -533,6 +543,7 @@ export class TileGeometryCreator {
         const dataSource = tile.dataSource;
         const displayZoomLevel = Math.floor(mapView.zoomLevel);
         const objects = tile.objects;
+        const viewRanges = mapView.viewRanges;
 
         for (const srcGeometry of decodedTile.geometries) {
             const groups = srcGeometry.groups;
@@ -601,49 +612,15 @@ export class TileGeometryCreator {
                 }
 
                 // Modify the standard textured shader to support height-based coloring.
-                if (
-                    isTerrainTechnique(technique) &&
-                    technique.heightBasedColors !== undefined &&
-                    technique.displacementMap !== undefined
-                ) {
-                    (material as any).onBeforeCompile = (shader: THREE.Shader) => {
-                        shader.fragmentShader = shader.fragmentShader.replace(
-                            "#include <map_pars_fragment>",
-                            `#include <map_pars_fragment>
-    uniform sampler2D displacementMap;
-    uniform float displacementScale;
-    uniform float displacementBias;`
-                        );
-
-                        shader.fragmentShader = shader.fragmentShader.replace(
-                            "#include <map_fragment>",
-                            `#ifdef USE_MAP
-    float minElevation = ${EarthConstants.MIN_ELEVATION.toFixed(1)};
-    float maxElevation = ${EarthConstants.MAX_ELEVATION.toFixed(1)};
-    float elevationRange = maxElevation - minElevation;
-
-    float disp = texture2D( displacementMap, vUv ).x * displacementScale + displacementBias;
-    vec4 texelColor = texture2D( map, vec2((disp - minElevation) / elevationRange, 0.0) );
-    texelColor = mapTexelToLinear( texelColor );
-    diffuseColor *= texelColor;
-#endif`
-                        );
-
-                        // We remove the displacement map from manipulating the vertices, it is
-                        // however still required for the pixel shader, so it can't be directly
-                        // removed.
-                        shader.vertexShader = shader.vertexShader.replace(
-                            "#include <displacementmap_vertex>",
-                            ""
-                        );
-                    };
+                if (isTerrainTechnique(technique)) {
+                    this.setupTerrainMaterial(technique, material, tile.mapView.clearColor);
                 }
 
                 const bufferGeometry = new THREE.BufferGeometry();
 
                 srcGeometry.vertexAttributes.forEach((vertexAttribute: BufferAttribute) => {
                     const buffer = getBufferAttribute(vertexAttribute);
-                    bufferGeometry.addAttribute(vertexAttribute.name, buffer);
+                    bufferGeometry.setAttribute(vertexAttribute.name, buffer);
                 });
 
                 if (srcGeometry.interleavedVertexAttributes !== undefined) {
@@ -675,7 +652,7 @@ export class TileGeometryCreator {
                                         interleavedAttr.offset,
                                         false
                                     );
-                                    bufferGeometry.addAttribute(interleavedAttr.name, attribute);
+                                    bufferGeometry.setAttribute(interleavedAttr.name, attribute);
                                 }
                             );
                         }
@@ -692,36 +669,22 @@ export class TileGeometryCreator {
 
                 bufferGeometry.addGroup(start, count);
 
-                if (isSolidLineTechnique(technique) || isDashedLineTechnique(technique)) {
-                    const lineMaterial = material as THREE.RawShaderMaterial;
-                    lineMaterial.uniforms.opacity.value = material.opacity;
-
+                if (isSolidLineTechnique(technique)) {
+                    // TODO: Unify access to shader defines via SolidLineMaterial setters
+                    assert(!isHighPrecisionLineMaterial(material));
+                    const lineMaterial = material as SolidLineMaterial;
                     if (
                         technique.clipping !== false &&
                         tile.projection.type === ProjectionType.Planar
                     ) {
-                        const tileSize = lineMaterial.uniforms.tileSize;
-                        const size = new THREE.Vector3();
-                        tile.boundingBox.getSize(size);
-                        tileSize.value.x = size.x;
-                        tileSize.value.y = size.y;
-                        lineMaterial.defines.TILE_CLIP = 1;
+                        tile.boundingBox.getSize(tmpVector3);
+                        tmpVector2.set(tmpVector3.x, tmpVector3.y);
+                        lineMaterial.clipTileSize = tmpVector2;
                     }
 
                     if (bufferGeometry.getAttribute("color")) {
-                        lineMaterial.defines.USE_COLOR = 1;
+                        setShaderMaterialDefine(lineMaterial, "USE_COLOR", true);
                     }
-                }
-                // Add polygon offset to the extruded buildings and to the fill area to avoid depth
-                // problems when rendering edges.
-                const hasExtrudedOutlines: boolean =
-                    isExtrudedPolygonTechnique(technique) && srcGeometry.edgeIndex !== undefined;
-                const hasFillOutlines: boolean =
-                    isFillTechnique(technique) && srcGeometry.edgeIndex !== undefined;
-                if (hasExtrudedOutlines || hasFillOutlines) {
-                    material.polygonOffset = true;
-                    material.polygonOffsetFactor = 0.75;
-                    material.polygonOffsetUnits = 4.0;
                 }
 
                 // Add the solid line outlines as a separate object.
@@ -729,10 +692,7 @@ export class TileGeometryCreator {
                     isSolidLineTechnique(technique) && technique.secondaryWidth !== undefined;
 
                 const object = new ObjectCtor(bufferGeometry, material);
-
-                object.frustumCulled = false;
-
-                object.renderOrder = technique.renderOrder;
+                object.renderOrder = technique.renderOrder!;
 
                 if (group.renderOrderOffset !== undefined) {
                     object.renderOrder += group.renderOrderOffset;
@@ -750,47 +710,53 @@ export class TileGeometryCreator {
                     (object as MapViewPoints).enableRayTesting = technique.enablePicking!;
                 }
 
-                if (
-                    isLineTechnique(technique) ||
-                    (isSegmentsTechnique(technique) &&
-                        technique.color !== undefined &&
-                        isInterpolatedProperty(technique.color))
-                ) {
+                if (isLineTechnique(technique) || isSegmentsTechnique(technique)) {
+                    const hasDynamicColor =
+                        Expr.isExpr(technique.color) || Expr.isExpr(technique.opacity);
                     const fadingParams = this.getFadingParams(displayZoomLevel, technique);
                     FadingFeature.addRenderHelper(
                         object,
+                        viewRanges,
                         fadingParams.fadeNear,
                         fadingParams.fadeFar,
                         false,
-                        false,
-                        (renderer, mat) => {
-                            const lineMaterial = mat as THREE.LineBasicMaterial;
-                            lineMaterial.color.set(
-                                getPropertyValue(technique.color, mapView.zoomLevel)
-                            );
-                        }
+                        hasDynamicColor
+                            ? (renderer, mat) => {
+                                  const lineMaterial = mat as THREE.LineBasicMaterial;
+                                  applyBaseColorToMaterial(
+                                      lineMaterial,
+                                      lineMaterial.color,
+                                      technique,
+                                      technique.color,
+                                      mapView.zoomLevel
+                                  );
+                              }
+                            : undefined
                     );
                 }
 
-                // Lines renderOrder fix: Render them as transparent objects, but make sure they end
-                // up in the opaque rendering queue (by disabling transparency onAfterRender, and
-                // enabling it onBeforeRender).
-                if (isSolidLineTechnique(technique) || isDashedLineTechnique(technique)) {
+                if (isSolidLineTechnique(technique)) {
+                    const hasDynamicColor =
+                        Expr.isExpr(technique.color) || Expr.isExpr(technique.opacity);
                     const fadingParams = this.getFadingParams(displayZoomLevel, technique);
                     FadingFeature.addRenderHelper(
                         object,
+                        viewRanges,
                         fadingParams.fadeNear,
                         fadingParams.fadeFar,
-                        true,
                         false,
                         (renderer, mat) => {
                             const lineMaterial = mat as SolidLineMaterial;
                             const unitFactor =
                                 technique.metricUnit === "Pixel" ? mapView.pixelToWorld : 1.0;
 
-                            if (technique.color !== undefined) {
-                                lineMaterial.color.set(
-                                    getPropertyValue(technique.color, mapView.zoomLevel)
+                            if (hasDynamicColor) {
+                                applyBaseColorToMaterial(
+                                    lineMaterial,
+                                    lineMaterial.color,
+                                    technique,
+                                    technique.color,
+                                    mapView.zoomLevel
                                 );
                             }
 
@@ -803,43 +769,46 @@ export class TileGeometryCreator {
                                 unitFactor *
                                 0.5;
 
-                            // Do the same for dashSize and gapSize for dashed lines.
-                            if (isDashedLineTechnique(technique)) {
-                                const dashedLineMaterial = lineMaterial as DashedLineMaterial;
+                            if (technique.outlineWidth !== undefined) {
+                                lineMaterial.outlineWidth =
+                                    getPropertyValue(
+                                        technique.outlineWidth,
+                                        mapView.zoomLevel,
+                                        mapView.pixelToWorld
+                                    ) * unitFactor;
+                            }
 
-                                if (technique.dashSize !== undefined) {
-                                    dashedLineMaterial.dashSize =
-                                        getPropertyValue(
-                                            technique.dashSize,
-                                            mapView.zoomLevel,
-                                            mapView.pixelToWorld
-                                        ) *
-                                        unitFactor *
-                                        0.5;
-                                }
+                            if (technique.dashSize !== undefined) {
+                                lineMaterial.dashSize =
+                                    getPropertyValue(
+                                        technique.dashSize,
+                                        mapView.zoomLevel,
+                                        mapView.pixelToWorld
+                                    ) *
+                                    unitFactor *
+                                    0.5;
+                            }
 
-                                if (technique.gapSize !== undefined) {
-                                    dashedLineMaterial.gapSize =
-                                        getPropertyValue(
-                                            technique.gapSize,
-                                            mapView.zoomLevel,
-                                            mapView.pixelToWorld
-                                        ) *
-                                        unitFactor *
-                                        0.5;
-                                }
+                            if (technique.gapSize !== undefined) {
+                                lineMaterial.gapSize =
+                                    getPropertyValue(
+                                        technique.gapSize,
+                                        mapView.zoomLevel,
+                                        mapView.pixelToWorld
+                                    ) *
+                                    unitFactor *
+                                    0.5;
                             }
                         }
                     );
                 }
 
                 if (isExtrudedLineTechnique(technique)) {
+                    const hasDynamicColor =
+                        Expr.isExpr(technique.color) || Expr.isExpr(technique.opacity);
                     // extruded lines are normal meshes, and need transparency only when fading or
                     // dynamic properties is defined.
-                    if (
-                        technique.fadeFar !== undefined ||
-                        isInterpolatedProperty(technique.color)
-                    ) {
+                    if (technique.fadeFar !== undefined || hasDynamicColor) {
                         const fadingParams = this.getFadingParams(
                             displayZoomLevel,
                             technique as StandardExtrudedLineTechnique
@@ -847,18 +816,22 @@ export class TileGeometryCreator {
 
                         FadingFeature.addRenderHelper(
                             object,
+                            viewRanges,
                             fadingParams.fadeNear,
                             fadingParams.fadeFar,
                             true,
-                            true,
-                            technique.color !== undefined && isInterpolatedProperty(technique.color)
+                            hasDynamicColor
                                 ? (renderer, mat) => {
                                       const extrudedMaterial = mat as
                                           | MapMeshStandardMaterial
                                           | MapMeshBasicMaterial;
 
-                                      extrudedMaterial.color.set(
-                                          getPropertyValue(technique.color!, mapView.zoomLevel)
+                                      applyBaseColorToMaterial(
+                                          extrudedMaterial,
+                                          extrudedMaterial.color,
+                                          technique,
+                                          technique.color!,
+                                          mapView.zoomLevel
                                       );
                                   }
                                 : undefined
@@ -866,24 +839,24 @@ export class TileGeometryCreator {
                     }
                 }
 
-                this.addFeatureData(srcGeometry, technique, object);
-                this.addGeometryObjInfos(srcGeometry, object);
+                this.addUserData(tile, srcGeometry, technique, object);
 
                 if (isExtrudedPolygonTechnique(technique) || isFillTechnique(technique)) {
                     // filled polygons are normal meshes, and need transparency only when fading or
                     // dynamic properties is defined.
-                    const hasDynamicColor =
-                        (technique.color !== undefined &&
-                            isInterpolatedProperty(technique.color)) ||
-                        (isExtrudedPolygonTechnique(technique) &&
-                            isInterpolatedProperty(technique.emissive));
+                    const hasDynamicPrimaryColor =
+                        Expr.isExpr(technique.color) || Expr.isExpr(technique.opacity);
+                    const hasDynamicSecondaryColor =
+                        isExtrudedPolygonTechnique(technique) && Expr.isExpr(technique.emissive);
+                    const hasDynamicColor = hasDynamicPrimaryColor || hasDynamicSecondaryColor;
+
                     if (technique.fadeFar !== undefined || hasDynamicColor) {
                         const fadingParams = this.getFadingParams(displayZoomLevel, technique);
                         FadingFeature.addRenderHelper(
                             object,
+                            viewRanges,
                             fadingParams.fadeNear,
                             fadingParams.fadeFar,
-                            true,
                             true,
                             hasDynamicColor
                                 ? (renderer, mat) => {
@@ -891,21 +864,27 @@ export class TileGeometryCreator {
                                           | MapMeshBasicMaterial
                                           | MapMeshStandardMaterial;
 
-                                      polygonMaterial.color.set(
-                                          getPropertyValue(technique.color!, mapView.zoomLevel)
-                                      );
+                                      if (hasDynamicPrimaryColor) {
+                                          applyBaseColorToMaterial(
+                                              polygonMaterial,
+                                              polygonMaterial.color,
+                                              technique,
+                                              technique.color!,
+                                              mapView.zoomLevel
+                                          );
+                                      }
 
                                       if (
-                                          isExtrudedPolygonTechnique(technique) &&
-                                          technique.emissive !== undefined
+                                          hasDynamicSecondaryColor &&
+                                          // Just to omit compiler warnings
+                                          isExtrudedPolygonTechnique(technique)
                                       ) {
                                           const standardMat = mat as MapMeshStandardMaterial;
 
-                                          standardMat.emissive.set(
-                                              getPropertyValue(
-                                                  technique.emissive,
-                                                  mapView.zoomLevel
-                                              )
+                                          applySecondaryColorToMaterial(
+                                              standardMat.emissive,
+                                              technique.emissive!,
+                                              mapView.zoomLevel
                                           );
                                       }
                                   }
@@ -932,8 +911,10 @@ export class TileGeometryCreator {
                     isExtrudedPolygonTechnique(technique) &&
                     animatedExtrusionHandler !== undefined
                 ) {
-                    let animateExtrusionValue = technique.animateExtrusion;
-
+                    let animateExtrusionValue = getPropertyValue(
+                        technique.animateExtrusion,
+                        displayZoomLevel
+                    );
                     if (animateExtrusionValue !== undefined) {
                         animateExtrusionValue =
                             typeof animateExtrusionValue === "boolean"
@@ -954,6 +935,9 @@ export class TileGeometryCreator {
 
                 if (renderDepthPrePass) {
                     const depthPassMesh = createDepthPrePassMesh(object as THREE.Mesh);
+                    // Set geometry kind for depth pass mesh so that it gets the displacement map
+                    // for elevation overlay.
+                    this.registerTileObject(tile, depthPassMesh, technique.kind);
                     objects.push(depthPassMesh);
 
                     if (extrusionAnimationEnabled) {
@@ -970,18 +954,28 @@ export class TileGeometryCreator {
                 objects.push(object);
 
                 // Add the extruded building edges as a separate geometry.
-                if (hasExtrudedOutlines) {
+                if (isExtrudedPolygonTechnique(technique) && srcGeometry.edgeIndex !== undefined) {
                     const edgeGeometry = new THREE.BufferGeometry();
-                    edgeGeometry.addAttribute("position", bufferGeometry.getAttribute("position"));
+                    edgeGeometry.setAttribute("position", bufferGeometry.getAttribute("position"));
 
                     const colorAttribute = bufferGeometry.getAttribute("color");
                     if (colorAttribute !== undefined) {
-                        edgeGeometry.addAttribute("color", colorAttribute);
+                        edgeGeometry.setAttribute("color", colorAttribute);
                     }
 
                     const extrusionAttribute = bufferGeometry.getAttribute("extrusionAxis");
                     if (extrusionAttribute !== undefined) {
-                        edgeGeometry.addAttribute("extrusionAxis", extrusionAttribute);
+                        edgeGeometry.setAttribute("extrusionAxis", extrusionAttribute);
+                    }
+
+                    const normalAttribute = bufferGeometry.getAttribute("normal");
+                    if (normalAttribute !== undefined) {
+                        edgeGeometry.setAttribute("normal", normalAttribute);
+                    }
+
+                    const uvAttribute = bufferGeometry.getAttribute("uv");
+                    if (uvAttribute !== undefined) {
+                        edgeGeometry.setAttribute("uv", uvAttribute);
                     }
 
                     edgeGeometry.setIndex(
@@ -1011,18 +1005,19 @@ export class TileGeometryCreator {
 
                     FadingFeature.addRenderHelper(
                         edgeObj,
+                        viewRanges,
                         fadingParams.lineFadeNear,
                         fadingParams.lineFadeFar,
                         false,
-                        false,
                         extrudedPolygonTechnique.lineColor !== undefined &&
-                            isInterpolatedProperty(extrudedPolygonTechnique.lineColor)
-                            ? (renderer, mat) => {
-                                  edgeMaterial.color.set(
-                                      getPropertyValue(
-                                          extrudedPolygonTechnique.lineColor!,
-                                          mapView.zoomLevel
-                                      )
+                            Expr.isExpr(extrudedPolygonTechnique.lineColor)
+                            ? () => {
+                                  applyBaseColorToMaterial(
+                                      edgeMaterial,
+                                      edgeMaterial.color,
+                                      extrudedPolygonTechnique,
+                                      extrudedPolygonTechnique.lineColor!,
+                                      mapView.zoomLevel
                                   );
                               }
                             : undefined
@@ -1061,9 +1056,10 @@ export class TileGeometryCreator {
                 }
 
                 // Add the fill area edges as a separate geometry.
-                if (hasFillOutlines) {
+
+                if (isFillTechnique(technique) && srcGeometry.edgeIndex !== undefined) {
                     const outlineGeometry = new THREE.BufferGeometry();
-                    outlineGeometry.addAttribute(
+                    outlineGeometry.setAttribute(
                         "position",
                         bufferGeometry.getAttribute("position")
                     );
@@ -1089,16 +1085,20 @@ export class TileGeometryCreator {
 
                     FadingFeature.addRenderHelper(
                         outlineObj,
+                        viewRanges,
                         fadingParams.lineFadeNear,
                         fadingParams.lineFadeFar,
-                        true,
                         false,
                         fillTechnique.lineColor !== undefined &&
-                            isInterpolatedProperty(fillTechnique.lineColor)
+                            Expr.isExpr(fillTechnique.lineColor)
                             ? (renderer, mat) => {
                                   const edgeMaterial = mat as EdgeMaterial;
-                                  edgeMaterial.color.set(
-                                      getPropertyValue(fillTechnique.lineColor!, mapView.zoomLevel)
+                                  applyBaseColorToMaterial(
+                                      edgeMaterial,
+                                      edgeMaterial.color,
+                                      fillTechnique,
+                                      fillTechnique.lineColor!,
+                                      mapView.zoomLevel
                                   );
                               }
                             : undefined
@@ -1115,9 +1115,12 @@ export class TileGeometryCreator {
                     const outlineColor = ColorCache.instance.getColor(
                         outlineTechnique.secondaryColor !== undefined
                             ? getPropertyValue(outlineTechnique.secondaryColor!, displayZoomLevel)
-                            : "0x000000"
+                            : 0x000000
                     );
                     outlineMaterial.uniforms.diffuse.value = outlineColor;
+                    if (outlineTechnique.secondaryCaps !== undefined) {
+                        outlineMaterial.caps = outlineTechnique.secondaryCaps;
+                    }
                     const outlineObj = new ObjectCtor(bufferGeometry, outlineMaterial);
 
                     outlineObj.renderOrder =
@@ -1132,9 +1135,9 @@ export class TileGeometryCreator {
                     const fadingParams = this.getFadingParams(displayZoomLevel, technique);
                     FadingFeature.addRenderHelper(
                         outlineObj,
+                        viewRanges,
                         fadingParams.fadeNear,
                         fadingParams.fadeFar,
-                        true,
                         false,
                         (renderer, mat) => {
                             const lineMaterial = mat as SolidLineMaterial;
@@ -1145,23 +1148,37 @@ export class TileGeometryCreator {
                                     : 1.0;
 
                             if (outlineTechnique.secondaryColor !== undefined) {
-                                lineMaterial.color.set(
-                                    getPropertyValue(
-                                        outlineTechnique.secondaryColor,
-                                        mapView.zoomLevel
-                                    )
+                                applyBaseColorToMaterial(
+                                    lineMaterial,
+                                    lineMaterial.color,
+                                    outlineTechnique,
+                                    outlineTechnique.secondaryColor,
+                                    mapView.zoomLevel
                                 );
                             }
 
                             if (outlineTechnique.secondaryWidth !== undefined) {
-                                lineMaterial.lineWidth =
-                                    getPropertyValue(
-                                        outlineTechnique.secondaryWidth!,
-                                        mapView.zoomLevel,
-                                        mapView.pixelToWorld
-                                    ) *
-                                    unitFactor *
-                                    0.5;
+                                const techniqueLineWidth = getPropertyValue(
+                                    outlineTechnique.lineWidth!,
+                                    mapView.zoomLevel,
+                                    mapView.pixelToWorld
+                                );
+                                const techniqueSecondaryWidth = getPropertyValue(
+                                    outlineTechnique.secondaryWidth!,
+                                    mapView.zoomLevel,
+                                    mapView.pixelToWorld
+                                );
+                                const techniqueOpacity = getPropertyValue(
+                                    outlineTechnique.opacity,
+                                    mapView.zoomLevel
+                                );
+                                // hide outline when it's equal or smaller then line to avoid subpixel contour
+                                const lineWidth =
+                                    techniqueSecondaryWidth <= techniqueLineWidth &&
+                                    (techniqueOpacity === undefined || techniqueOpacity === 1)
+                                        ? 0
+                                        : techniqueSecondaryWidth;
+                                lineMaterial.lineWidth = lineWidth * unitFactor * 0.5;
                             }
                         }
                     );
@@ -1183,235 +1200,124 @@ export class TileGeometryCreator {
     }
 
     /**
-     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
-     * [[Technique]] and the current zoomLevel.
-     *
-     * @param technique Label's technique.
-     * @param techniqueIdx Label's technique index.
-     */
-    getRenderStyle(
-        tile: Tile,
-        technique: TextTechnique | PoiTechnique | LineMarkerTechnique
-    ): TextRenderStyle {
-        const mapView = tile.mapView;
-        const dataSource = tile.dataSource;
-        const zoomLevel = mapView.zoomLevel;
-
-        const cacheId = computeStyleCacheId(dataSource.name, technique, Math.floor(zoomLevel));
-        let renderStyle = mapView.textRenderStyleCache.get(cacheId);
-        if (renderStyle === undefined) {
-            const defaultRenderParams =
-                mapView.textElementsRenderer !== undefined
-                    ? mapView.textElementsRenderer.defaultStyle.renderParams
-                    : {
-                          fontSize: {
-                              unit: FontUnit.Pixel,
-                              size: 32,
-                              backgroundSize: 8
-                          }
-                      };
-
-            if (technique.color !== undefined) {
-                const hexColor = getPropertyValue(technique.color, Math.floor(zoomLevel));
-                TileGeometryCreator.m_colorMap.set(cacheId, ColorCache.instance.getColor(hexColor));
-            }
-            if (technique.backgroundColor !== undefined) {
-                const hexBgColor = getPropertyValue(
-                    technique.backgroundColor,
-                    Math.floor(zoomLevel)
-                );
-                TileGeometryCreator.m_colorMap.set(
-                    cacheId + "_bg",
-                    ColorCache.instance.getColor(hexBgColor)
-                );
-            }
-
-            const renderParams = {
-                fontName: getOptionValue(technique.fontName, defaultRenderParams.fontName),
-                fontSize: {
-                    unit: FontUnit.Pixel,
-                    size:
-                        technique.size !== undefined
-                            ? getPropertyValue(technique.size, Math.floor(zoomLevel))
-                            : defaultRenderParams.fontSize!.size,
-                    backgroundSize:
-                        technique.backgroundSize !== undefined
-                            ? getPropertyValue(technique.backgroundSize, Math.floor(zoomLevel))
-                            : defaultRenderParams.fontSize!.backgroundSize
-                },
-                fontStyle:
-                    technique.fontStyle === "Regular" ||
-                    technique.fontStyle === "Bold" ||
-                    technique.fontStyle === "Italic" ||
-                    technique.fontStyle === "BoldItalic"
-                        ? FontStyle[technique.fontStyle]
-                        : defaultRenderParams.fontStyle,
-                fontVariant:
-                    technique.fontVariant === "Regular" ||
-                    technique.fontVariant === "AllCaps" ||
-                    technique.fontVariant === "SmallCaps"
-                        ? FontVariant[technique.fontVariant]
-                        : defaultRenderParams.fontVariant,
-                rotation: getOptionValue(technique.rotation, defaultRenderParams.rotation),
-                color: getOptionValue(
-                    TileGeometryCreator.m_colorMap.get(cacheId),
-                    defaultRenderParams.color
-                ),
-                backgroundColor: getOptionValue(
-                    TileGeometryCreator.m_colorMap.get(cacheId + "_bg"),
-                    defaultRenderParams.backgroundColor
-                ),
-                opacity:
-                    technique.opacity !== undefined
-                        ? getPropertyValue(technique.opacity, Math.floor(zoomLevel))
-                        : defaultRenderParams.opacity,
-                backgroundOpacity:
-                    technique.backgroundOpacity !== undefined
-                        ? getPropertyValue(technique.backgroundOpacity, Math.floor(zoomLevel))
-                        : defaultRenderParams.backgroundOpacity
-            };
-
-            const themeRenderParams =
-                mapView.textElementsRenderer !== undefined
-                    ? mapView.textElementsRenderer!.getTextElementStyle(technique.style)
-                          .renderParams
-                    : {};
-            renderStyle = new TextRenderStyle({
-                ...themeRenderParams,
-                ...renderParams
-            });
-            mapView.textRenderStyleCache.set(cacheId, renderStyle);
-        }
-
-        return renderStyle;
-    }
-
-    /**
-     * Gets the appropriate [[TextRenderStyle]] to use for a label. Depends heavily on the label's
-     * [[Technique]] and the current zoomLevel.
-     *
-     * @param tile The [[Tile]] to process.
-     * @param technique Label's technique.
-     */
-    getLayoutStyle(
-        tile: Tile,
-        technique: TextTechnique | PoiTechnique | LineMarkerTechnique
-    ): TextLayoutStyle {
-        const mapView = tile.mapView;
-        const dataSource = tile.dataSource;
-        const zoomLevel = mapView.zoomLevel;
-
-        const cacheId = computeStyleCacheId(dataSource.name, technique, Math.floor(zoomLevel));
-        let layoutStyle = mapView.textLayoutStyleCache.get(cacheId);
-        if (layoutStyle === undefined) {
-            const defaultLayoutParams =
-                mapView.textElementsRenderer !== undefined
-                    ? mapView.textElementsRenderer.defaultStyle.layoutParams
-                    : {};
-
-            const layoutParams = {
-                tracking: getOptionValue(technique.tracking, defaultLayoutParams.tracking),
-                leading: getOptionValue(technique.leading, defaultLayoutParams.leading),
-                maxLines: getOptionValue(technique.maxLines, defaultLayoutParams.maxLines),
-                lineWidth: getOptionValue(technique.lineWidth, defaultLayoutParams.lineWidth),
-                canvasRotation: getOptionValue(
-                    technique.canvasRotation,
-                    defaultLayoutParams.canvasRotation
-                ),
-                lineRotation: getOptionValue(
-                    technique.lineRotation,
-                    defaultLayoutParams.lineRotation
-                ),
-                wrappingMode:
-                    technique.wrappingMode === "None" ||
-                    technique.wrappingMode === "Character" ||
-                    technique.wrappingMode === "Word"
-                        ? WrappingMode[technique.wrappingMode]
-                        : defaultLayoutParams.wrappingMode,
-                horizontalAlignment:
-                    technique.hAlignment === "Left" ||
-                    technique.hAlignment === "Center" ||
-                    technique.hAlignment === "Right"
-                        ? HorizontalAlignment[technique.hAlignment]
-                        : defaultLayoutParams.horizontalAlignment,
-                verticalAlignment:
-                    technique.vAlignment === "Above" ||
-                    technique.vAlignment === "Center" ||
-                    technique.vAlignment === "Below"
-                        ? VerticalAlignment[technique.vAlignment]
-                        : defaultLayoutParams.verticalAlignment
-            };
-
-            const themeLayoutParams =
-                mapView.textElementsRenderer !== undefined
-                    ? mapView.textElementsRenderer!.getTextElementStyle(technique.style)
-                          .layoutParams
-                    : {};
-            layoutStyle = new TextLayoutStyle({
-                ...themeLayoutParams,
-                ...layoutParams
-            });
-            mapView.textLayoutStyleCache.set(cacheId, layoutStyle);
-        }
-
-        return layoutStyle;
-    }
-
-    /**
      * Creates and add a background plane for the tile.
      */
-    addGroundPlane(tile: Tile) {
+    addGroundPlane(tile: Tile, renderOrder: number) {
         const mapView = tile.mapView;
         const dataSource = tile.dataSource;
         const projection = tile.projection;
 
         const color = mapView.clearColor;
+        const tmpV = new THREE.Vector3();
 
         if (tile.projection.type === ProjectionType.Spherical) {
             const { east, west, north, south } = tile.geoBox;
             const sourceProjection = dataSource.getTilingScheme().projection;
-            const g = new THREE.Geometry();
-            g.vertices.push(
-                sourceProjection.projectPoint(new GeoCoordinates(south, west), new THREE.Vector3()),
-                sourceProjection.projectPoint(new GeoCoordinates(south, east), new THREE.Vector3()),
-                sourceProjection.projectPoint(new GeoCoordinates(north, west), new THREE.Vector3()),
-                sourceProjection.projectPoint(new GeoCoordinates(north, east), new THREE.Vector3())
+            const g = new THREE.BufferGeometry();
+            const posAttr = new THREE.BufferAttribute(
+                new Float32Array([
+                    ...sourceProjection
+                        .projectPoint(new GeoCoordinates(south, west), tmpV)
+                        .toArray(),
+                    ...sourceProjection
+                        .projectPoint(new GeoCoordinates(south, east), tmpV)
+                        .toArray(),
+                    ...sourceProjection
+                        .projectPoint(new GeoCoordinates(north, west), tmpV)
+                        .toArray(),
+                    ...sourceProjection
+                        .projectPoint(new GeoCoordinates(north, east), tmpV)
+                        .toArray()
+                ]),
+                3
             );
-            g.faces.push(new THREE.Face3(0, 1, 2), new THREE.Face3(2, 1, 3));
+            g.setAttribute("position", posAttr);
+            g.setIndex(new THREE.BufferAttribute(new Uint16Array([0, 1, 2, 2, 1, 3]), 1));
             const modifier = new SphericalGeometrySubdivisionModifier(
                 THREE.Math.degToRad(10),
                 sourceProjection
             );
             modifier.modify(g);
-            g.vertices.forEach(v => {
-                projection.reprojectPoint(sourceProjection, v, v);
-                v.sub(tile.center);
-            });
+
+            for (let i = 0; i < posAttr.array.length; i += 3) {
+                tmpV.set(posAttr.array[i], posAttr.array[i + 1], posAttr.array[i + 2]);
+                projection.reprojectPoint(sourceProjection, tmpV, tmpV);
+                tmpV.sub(tile.center);
+                (posAttr.array as Float32Array)[i] = tmpV.x;
+                (posAttr.array as Float32Array)[i + 1] = tmpV.y;
+                (posAttr.array as Float32Array)[i + 2] = tmpV.z;
+            }
+            posAttr.needsUpdate = true;
+
             const material = new MapMeshBasicMaterial({
                 color,
-                visible: true
+                visible: true,
+                depthWrite: true
             });
-            const bufferGeometry = new THREE.BufferGeometry();
-            bufferGeometry.fromGeometry(g);
-            const mesh = new THREE.Mesh(bufferGeometry, material);
-            mesh.renderOrder = Number.MIN_SAFE_INTEGER;
+            const mesh = new THREE.Mesh(g, material);
+            mesh.renderOrder = renderOrder;
             this.registerTileObject(tile, mesh, GeometryKind.Background);
             tile.objects.push(mesh);
         } else {
             // Add a ground plane to the tile.
-            const planeSize = new THREE.Vector3();
-            tile.boundingBox.getSize(planeSize);
+            tile.boundingBox.getSize(tmpV);
             const groundPlane = this.createPlane(
-                planeSize.x,
-                planeSize.y,
+                tmpV.x,
+                tmpV.y,
                 tile.center,
                 color,
-                true
+                true,
+                renderOrder
             );
 
             this.registerTileObject(tile, groundPlane, GeometryKind.Background);
             tile.objects.push(groundPlane);
         }
+    }
+
+    private setupTerrainMaterial(
+        technique: TerrainTechnique,
+        material: THREE.Material,
+        terrainColor: number
+    ) {
+        if (technique.displacementMap === undefined) {
+            // Render terrain using the given color.
+            const stdMaterial = material as MapMeshStandardMaterial;
+            stdMaterial.color.set(terrainColor);
+            return;
+        }
+
+        // Render terrain using height-based colors.
+        (material as any).onBeforeCompile = (shader: THREE.Shader) => {
+            shader.fragmentShader = shader.fragmentShader.replace(
+                "#include <map_pars_fragment>",
+                `#include <map_pars_fragment>
+    uniform sampler2D displacementMap;
+    uniform float displacementScale;
+    uniform float displacementBias;`
+            );
+            shader.fragmentShader = shader.fragmentShader.replace(
+                "#include <map_fragment>",
+                `#ifdef USE_MAP
+    float minElevation = ${EarthConstants.MIN_ELEVATION.toFixed(1)};
+    float maxElevation = ${EarthConstants.MAX_ELEVATION.toFixed(1)};
+    float elevationRange = maxElevation - minElevation;
+
+    float disp = texture2D( displacementMap, vUv ).x * displacementScale + displacementBias;
+    vec4 texelColor = texture2D( map, vec2((disp - minElevation) / elevationRange, 0.0) );
+    texelColor = mapTexelToLinear( texelColor );
+    diffuseColor *= texelColor;
+#endif`
+            );
+            // We remove the displacement map from manipulating the vertices, it is
+            // however still required for the pixel shader, so it can't be directly
+            // removed.
+            shader.vertexShader = shader.vertexShader.replace(
+                "#include <displacementmap_vertex>",
+                ""
+            );
+        };
+        (material as MapMeshStandardMaterial).displacementMap!.needsUpdate = true;
     }
 
     /**
@@ -1429,55 +1335,69 @@ export class TileGeometryCreator {
         height: number,
         planeCenter: THREE.Vector3,
         colorHex: number,
-        isVisible: boolean
+        isVisible: boolean,
+        renderOrder: number
     ): THREE.Mesh {
         const geometry = new THREE.PlaneGeometry(width, height, 1);
         // TODO cache the material HARP-4207
         const material = new MapMeshBasicMaterial({
             color: colorHex,
-            visible: isVisible
+            visible: isVisible,
+            depthWrite: false
         });
         const plane = new THREE.Mesh(geometry, material);
         plane.position.copy(planeCenter);
         // Render before everything else
-        plane.renderOrder = Number.MIN_SAFE_INTEGER;
+        plane.renderOrder = renderOrder;
         return plane;
     }
 
-    /**
-     * Pass the feature data on to the object, so it can be used in picking
-     * `MapView.intersectMapObjects()`. Do not pass the feature data if the technique is a
-     * dashed-line or a solid-line, because the line picking functionality for the lines is not
-     * object based, but tile based.
-     *
-     * @param srcGeometry The original [[Geometry]].
-     * @param technique The corresponding [[Technique]].
-     * @param object The object to pass info to.
-     */
-    private addFeatureData(srcGeometry: Geometry, technique: Technique, object: THREE.Object3D) {
-        if (
-            ((srcGeometry.featureIds !== undefined && srcGeometry.featureIds.length > 0) ||
-                isCirclesTechnique(technique) ||
-                isSquaresTechnique(technique)) &&
-            !isSolidLineTechnique(technique) &&
-            !isDashedLineTechnique(technique)
-        ) {
+    private addUserData(
+        tile: Tile,
+        srcGeometry: Geometry,
+        technique: Technique,
+        object: THREE.Object3D
+    ) {
+        if ((srcGeometry.objInfos?.length ?? 0) === 0) {
+            return;
+        }
+
+        if (isTerrainTechnique(technique)) {
+            assert(
+                Object.keys(object.userData).length === 0,
+                "Unexpected user data in terrain object"
+            );
+
+            assert(
+                typeof srcGeometry.objInfos![0] === "object",
+                "Wrong attribute map type for terrain geometry"
+            );
+
+            const displacementMap = (srcGeometry.objInfos as DisplacementMap[])[0];
+            const tileDisplacementMap: TileDisplacementMap = {
+                tileKey: tile.tileKey,
+                texture: new THREE.DataTexture(
+                    displacementMap.buffer,
+                    displacementMap.xCountVertices,
+                    displacementMap.yCountVertices,
+                    THREE.LuminanceFormat,
+                    THREE.FloatType
+                ),
+                displacementMap
+            };
+            object.userData = tileDisplacementMap;
+        } else if (isSolidLineTechnique(technique)) {
+            object.userData = srcGeometry.objInfos!;
+        } else {
+            // Set the feature data for picking with `MapView.intersectMapObjects()` except for
+            // solid-line which uses tile-based picking.
             const featureData: TileFeatureData = {
                 geometryType: srcGeometry.type,
-                ids: srcGeometry.featureIds,
-                starts: srcGeometry.featureStarts
+                starts: srcGeometry.featureStarts,
+                objInfos: srcGeometry.objInfos
             };
             object.userData.feature = featureData;
-
-            if (srcGeometry.objInfos !== undefined) {
-                object.userData.feature.objInfos = srcGeometry.objInfos;
-            }
-        }
-    }
-
-    private addGeometryObjInfos(srcGeometry: Geometry, object: THREE.Object3D) {
-        if (srcGeometry.objInfos !== undefined && Object.keys(object.userData).length === 0) {
-            object.userData = srcGeometry.objInfos;
+            object.userData.technique = technique;
         }
     }
 
@@ -1486,7 +1406,7 @@ export class TileGeometryCreator {
      */
     private getFadingParams(
         displayZoomLevel: number,
-        technique: BaseTechniqueParams
+        technique: MakeTechniqueAttrs<BaseTechniqueParams>
     ): FadingParameters {
         const fadeNear =
             technique.fadeNear !== undefined

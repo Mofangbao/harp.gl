@@ -3,19 +3,21 @@
  * Licensed under Apache 2.0, see full license in LICENSE
  * SPDX-License-Identifier: Apache-2.0
  */
+
 import {
     DecodedTile,
+    Definitions,
     ExtendedTileInfo,
     GeometryKind,
     IndexedTechnique,
     OptionsMap,
     StyleSet,
-    Technique,
     TileInfo
 } from "@here/harp-datasource-protocol";
-import { Env, MapEnv, StyleSetEvaluator } from "@here/harp-datasource-protocol/index-decoder";
+import { MapEnv, StyleSetEvaluator } from "@here/harp-datasource-protocol/index-decoder";
 import {
     GeoBox,
+    OrientedBox3,
     Projection,
     TileKey,
     TilingScheme,
@@ -29,9 +31,12 @@ import {
 import { LoggerManager, PerformanceTimer } from "@here/harp-utils";
 import * as THREE from "three";
 
+// tslint:disable-next-line:max-line-length
+import { AttrEvaluationContext } from "@here/harp-datasource-protocol/lib/TechniqueAttr";
 import { IGeometryProcessor, ILineGeometry, IPolygonGeometry } from "./IGeometryProcessor";
 import { OmvProtobufDataAdapter } from "./OmvData";
 import {
+    ComposedDataFilter,
     OmvFeatureFilter,
     OmvFeatureModifier,
     OmvGenericFeatureFilter,
@@ -46,6 +51,8 @@ import {
 } from "./OmvDecoderDefs";
 import { OmvTileInfoEmitter } from "./OmvTileInfoEmitter";
 import { OmvTomTomFeatureModifier } from "./OmvTomTomFeatureModifier";
+import { WorldTileProjectionCookie } from "./OmvUtils";
+import { StyleSetDataFilter } from "./StyleSetDataFilter";
 import { VTJsonDataAdapter } from "./VTJsonDataAdapter";
 
 const logger = LoggerManager.instance.create("OmvDecoder", { enabled: false });
@@ -56,23 +63,20 @@ export class Ring {
     /**
      * Constructs a new [[Ring]].
      *
-     * @param vertexStride The stride of this elements stored in 'contour' and 'points'.
+     * @param extents The extents of the enclosing layer.
+     * @param vertexStride The stride of this elements stored in 'contour'.
      * @param contour The [[Array]] containing the projected world coordinates.
-     * @param points An optional [[Array]] containing points projected
-     *               using the equirectangular projection.
-     * @param contourOutlines An optional [[Array]] of outline attributes.
      */
     constructor(
+        readonly extents: number,
         readonly vertexStride: number,
-        readonly contour: number[],
-        readonly contourOutlines?: boolean[],
-        readonly points: number[] = contour
+        readonly contour: number[]
     ) {
         this.winding = this.area() < 0;
     }
 
     area(): number {
-        const points = this.points;
+        const points = this.contour;
         const stride = this.vertexStride;
         const n = points.length / stride;
 
@@ -86,71 +90,33 @@ export class Ring {
 
         return area / 2;
     }
-
-    /*
-     * Extracts outlines from the ring contour data
-     */
-    getOutlines() {
-        const stride = this.vertexStride;
-        const { contourOutlines, contour } = this;
-
-        if (contourOutlines === undefined) {
-            const outLine = contour.slice();
-            outLine.push(...outLine.slice(0, stride));
-            return [outLine];
-        }
-
-        const { length } = contourOutlines;
-
-        const lines: number[][] = [];
-        let line: number[] = [];
-
-        for (let i = 0; i < length; i++) {
-            const isOutline = contourOutlines[i];
-            let index = i * stride;
-
-            if (!isOutline && line.length !== 0) {
-                lines.push(line);
-                line = [];
-            } else if (isOutline && line.length === 0) {
-                line.push(...contour.slice(index, index + stride));
-                index = (index + stride) % (length * stride);
-                line.push(...contour.slice(index, index + stride));
-            } else if (isOutline) {
-                index = (index + stride) % (length * stride);
-                line.push(...contour.slice(index, index + stride));
-            }
-        }
-        if (line.length) {
-            lines.push(line);
-        }
-
-        return lines;
-    }
 }
 
 export interface IOmvEmitter {
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
-        env: MapEnv,
-        techniques: Technique[],
+        extents: number,
+        geometry: THREE.Vector2[],
+        context: AttrEvaluationContext,
+        techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void;
 
     processLineFeature(
         layer: string,
+        extents: number,
         feature: ILineGeometry[],
-        env: MapEnv,
-        techniques: Technique[],
+        context: AttrEvaluationContext,
+        techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void;
 
     processPolygonFeature(
         layer: string,
+        extents: number,
         feature: IPolygonGeometry[],
-        env: MapEnv,
-        techniques: Technique[],
+        context: AttrEvaluationContext,
+        techniques: IndexedTechnique[],
         featureId: number | undefined
     ): void;
 }
@@ -160,6 +126,11 @@ export interface IOmvEmitter {
  * can be processed by [[OmvDecoder]].
  */
 export interface OmvDataAdapter {
+    /**
+     * OmvDataAdapter's id.
+     */
+    id: string;
+
     /**
      * Checks if the given data can be processed by this OmvDataAdapter.
      *
@@ -190,16 +161,25 @@ export class OmvDecoder implements IGeometryProcessor {
         private readonly m_showMissingTechniques: boolean,
         private readonly m_dataFilter?: OmvFeatureFilter,
         private readonly m_featureModifier?: OmvFeatureModifier,
-        private readonly m_gatherFeatureIds = true,
+        private readonly m_gatherFeatureAttributes = false,
         private readonly m_createTileInfo = false,
         private readonly m_gatherRoadSegments = false,
         private readonly m_skipShortLabels = true,
         private readonly m_storageLevelOffset = 0,
+        private readonly m_enableElevationOverlay = false,
         private readonly m_languages?: string[]
     ) {
+        const styleSetDataFilter = new StyleSetDataFilter(m_styleSetEvaluator);
+        const dataPreFilter = m_dataFilter
+            ? new ComposedDataFilter([styleSetDataFilter, m_dataFilter])
+            : styleSetDataFilter;
         // Register the default adapters.
-        this.m_dataAdapters.push(new OmvProtobufDataAdapter(this, m_dataFilter, logger));
-        this.m_dataAdapters.push(new VTJsonDataAdapter(this, m_dataFilter, logger));
+        this.m_dataAdapters.push(new OmvProtobufDataAdapter(this, dataPreFilter, logger));
+        this.m_dataAdapters.push(new VTJsonDataAdapter(this, dataPreFilter, logger));
+    }
+
+    get storageLevelOffset() {
+        return this.m_storageLevelOffset;
     }
 
     /**
@@ -211,17 +191,38 @@ export class OmvDecoder implements IGeometryProcessor {
      * @returns A [[DecodedTile]]
      */
     getDecodedTile(tileKey: TileKey, data: ArrayBufferLike | {}): DecodedTile {
+        let dataAdapter;
+        for (const adapter of this.m_dataAdapters.values()) {
+            if (adapter.canProcess(data)) {
+                dataAdapter = adapter;
+                break;
+            }
+        }
+        if (dataAdapter === undefined) {
+            return {
+                techniques: [],
+                geometries: []
+            };
+        }
+
+        this.m_styleSetEvaluator.resetTechniques();
+
         const tileSizeOnScreen = this.estimatedTileSizeOnScreen();
-        const decodeInfo = new OmvDecoder.DecodeInfo(this.m_projection, tileKey, tileSizeOnScreen);
+        const decodeInfo = new OmvDecoder.DecodeInfo(
+            dataAdapter.id,
+            this.m_projection,
+            tileKey,
+            tileSizeOnScreen
+        );
 
         this.m_decodedTileEmitter = new OmvDecodedTileEmitter(
             decodeInfo,
             this.m_styleSetEvaluator,
-            this.m_gatherFeatureIds,
+            this.m_gatherFeatureAttributes,
             this.m_skipShortLabels,
+            this.m_enableElevationOverlay,
             this.m_languages
         );
-
         if (this.m_createTileInfo) {
             const storeExtendedTags = true;
             this.m_infoTileEmitter = new OmvTileInfoEmitter(
@@ -231,12 +232,8 @@ export class OmvDecoder implements IGeometryProcessor {
                 this.m_gatherRoadSegments
             );
         }
-        for (const adapter of this.m_dataAdapters.values()) {
-            if (adapter.canProcess(data)) {
-                adapter.process(data, tileKey, decodeInfo.geoBox);
-                break;
-            }
-        }
+
+        dataAdapter.process(data, tileKey, decodeInfo.geoBox);
         const decodedTile = this.m_decodedTileEmitter.getDecodedTile();
 
         if (this.m_createTileInfo) {
@@ -247,8 +244,26 @@ export class OmvDecoder implements IGeometryProcessor {
     }
 
     getTileInfo(tileKey: TileKey, data: ArrayBufferLike | {}): ExtendedTileInfo {
+        let dataAdapter;
+        for (const adapter of this.m_dataAdapters.values()) {
+            if (adapter.canProcess(data)) {
+                dataAdapter = adapter;
+                break;
+            }
+        }
+        if (dataAdapter === undefined) {
+            return new ExtendedTileInfo(tileKey, false);
+        }
+
+        this.m_styleSetEvaluator.resetTechniques();
+
         const tileSizeOnScreen = this.estimatedTileSizeOnScreen();
-        const decodeInfo = new OmvDecoder.DecodeInfo(this.m_projection, tileKey, tileSizeOnScreen);
+        const decodeInfo = new OmvDecoder.DecodeInfo(
+            dataAdapter.id,
+            this.m_projection,
+            tileKey,
+            tileSizeOnScreen
+        );
 
         const storeExtendedTags = true;
         this.m_infoTileEmitter = new OmvTileInfoEmitter(
@@ -270,7 +285,8 @@ export class OmvDecoder implements IGeometryProcessor {
 
     processPointFeature(
         layer: string,
-        geometry: THREE.Vector3[],
+        extents: number,
+        geometry: THREE.Vector2[],
         env: MapEnv,
         storageLevel: number
     ): void {
@@ -282,7 +298,7 @@ export class OmvDecoder implements IGeometryProcessor {
         }
 
         const techniques = this.applyKindFilter(
-            this.m_styleSetEvaluator.getMatchingTechniques(env),
+            this.m_styleSetEvaluator.getMatchingTechniques(env, layer, "point"),
             GeometryKind.Label
         );
 
@@ -295,25 +311,40 @@ export class OmvDecoder implements IGeometryProcessor {
             }
             return;
         }
+        const context = {
+            env,
+            storageLevel,
+            zoomLevel: this.getZoomLevel(storageLevel),
+            cachedExprResults: this.m_styleSetEvaluator.expressionEvaluatorCache
+        };
 
         const featureId = env.lookup("$id") as number | undefined;
 
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processPointFeature(
                 layer,
+                extents,
                 geometry,
-                env,
+                context,
                 techniques,
                 featureId
             );
         }
         if (this.m_infoTileEmitter) {
-            this.m_infoTileEmitter.processPointFeature(layer, geometry, env, techniques, featureId);
+            this.m_infoTileEmitter.processPointFeature(
+                layer,
+                extents,
+                geometry,
+                context,
+                techniques,
+                featureId
+            );
         }
     }
 
     processLineFeature(
         layer: string,
+        extents: number,
         geometry: ILineGeometry[],
         env: MapEnv,
         storageLevel: number
@@ -326,7 +357,7 @@ export class OmvDecoder implements IGeometryProcessor {
         }
 
         const techniques = this.applyKindFilter(
-            this.m_styleSetEvaluator.getMatchingTechniques(env),
+            this.m_styleSetEvaluator.getMatchingTechniques(env, layer, "line"),
             GeometryKind.Line
         );
 
@@ -340,24 +371,39 @@ export class OmvDecoder implements IGeometryProcessor {
             return;
         }
 
+        const context = {
+            env,
+            storageLevel,
+            zoomLevel: this.getZoomLevel(storageLevel),
+            cachedExprResults: this.m_styleSetEvaluator.expressionEvaluatorCache
+        };
         const featureId = env.lookup("$id") as number | undefined;
 
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processLineFeature(
                 layer,
+                extents,
                 geometry,
-                env,
+                context,
                 techniques,
                 featureId
             );
         }
         if (this.m_infoTileEmitter) {
-            this.m_infoTileEmitter.processLineFeature(layer, geometry, env, techniques, featureId);
+            this.m_infoTileEmitter.processLineFeature(
+                layer,
+                extents,
+                geometry,
+                context,
+                techniques,
+                featureId
+            );
         }
     }
 
     processPolygonFeature(
         layer: string,
+        extents: number,
         geometry: IPolygonGeometry[],
         env: MapEnv,
         storageLevel: number
@@ -370,7 +416,7 @@ export class OmvDecoder implements IGeometryProcessor {
         }
 
         const techniques = this.applyKindFilter(
-            this.m_styleSetEvaluator.getMatchingTechniques(env),
+            this.m_styleSetEvaluator.getMatchingTechniques(env, layer, "polygon"),
             GeometryKind.Area
         );
 
@@ -384,12 +430,20 @@ export class OmvDecoder implements IGeometryProcessor {
             return;
         }
 
+        const context = {
+            env,
+            storageLevel,
+            zoomLevel: this.getZoomLevel(storageLevel),
+            cachedExprResults: this.m_styleSetEvaluator.expressionEvaluatorCache
+        };
         const featureId = env.lookup("$id") as number | undefined;
+
         if (this.m_decodedTileEmitter) {
             this.m_decodedTileEmitter.processPolygonFeature(
                 layer,
+                extents,
                 geometry,
-                env,
+                context,
                 techniques,
                 featureId
             );
@@ -397,8 +451,9 @@ export class OmvDecoder implements IGeometryProcessor {
         if (this.m_infoTileEmitter) {
             this.m_infoTileEmitter.processPolygonFeature(
                 layer,
+                extents,
                 geometry,
-                env,
+                context,
                 techniques,
                 featureId
             );
@@ -414,6 +469,10 @@ export class OmvDecoder implements IGeometryProcessor {
     protected estimatedTileSizeOnScreen(): number {
         const tileSizeOnScreen = 256 * Math.pow(2, -this.m_storageLevelOffset);
         return tileSizeOnScreen;
+    }
+
+    private getZoomLevel(storageLevel: number) {
+        return Math.max(0, storageLevel - (this.m_storageLevelOffset || 0));
     }
 
     private applyKindFilter(
@@ -437,6 +496,8 @@ export namespace OmvDecoder {
          * The [[GeoBox]] of the Tile to decode.
          */
         readonly geoBox: GeoBox;
+
+        readonly projectedBoundingBox = new OrientedBox3();
 
         /**
          * The tile bounds in the OMV tile space [[webMercatorTilingScheme]].
@@ -463,14 +524,18 @@ export namespace OmvDecoder {
          */
         readonly projectedTileBounds = new THREE.Box3();
 
+        worldTileProjectionCookie?: WorldTileProjectionCookie;
+
         /**
          * Constructs a new [[DecodeInfo]].
          *
+         * @param adapterId The id of the [[OmvDataAdapter]] used for decoding.
          * @param targetProjection The [[Projection]]
          * @param tileKey The [[TileKey]] of the Tile to decode.
          * @param tileSizeOnScreen The estimated size of the Tile in pixels.
          */
         constructor(
+            readonly adapterId: string,
             readonly targetProjection: Projection,
             readonly tileKey: TileKey,
             readonly tileSizeOnScreen: number
@@ -478,7 +543,9 @@ export namespace OmvDecoder {
             this.geoBox = this.tilingScheme.getGeoBox(tileKey);
 
             this.targetProjection.projectBox(this.geoBox, this.projectedTileBounds);
-            this.projectedTileBounds.getCenter(this.center);
+
+            this.targetProjection.projectBox(this.geoBox, this.projectedBoundingBox);
+            this.projectedBoundingBox.getCenter(this.center);
 
             this.tilingScheme.getWorldBox(tileKey, this.tileBounds);
             this.tileBounds.getSize(this.tileSize);
@@ -500,55 +567,24 @@ export namespace OmvDecoder {
             return this.tilingScheme.projection;
         }
     }
-
-    export function getFeatureName(
-        env: Env,
-        useAbbreviation: boolean,
-        useIsoCode: boolean,
-        languages?: string[]
-    ): string | undefined {
-        let name;
-        if (useAbbreviation) {
-            const abbreviation = env.lookup(`name:short`);
-            if (typeof abbreviation === "string" && abbreviation.length > 0) {
-                return abbreviation;
-            }
-        }
-        if (useIsoCode) {
-            const isoCode = env.lookup(`iso_code`);
-            if (typeof isoCode === "string" && isoCode.length > 0) {
-                return isoCode;
-            }
-        }
-        if (languages !== undefined) {
-            for (const language of languages) {
-                name = env.lookup(`name:${language}`) || env.lookup(`name_${language}`);
-                if (typeof name === "string" && name.length > 0) {
-                    return name;
-                }
-            }
-        }
-        name = env.lookup("name");
-        if (typeof name === "string") {
-            return name;
-        }
-        return undefined;
-    }
 }
 
 export class OmvTileDecoder extends ThemedTileDecoder {
     private m_showMissingTechniques: boolean = false;
     private m_featureFilter?: OmvFeatureFilter;
     private m_featureModifier?: OmvFeatureModifier;
-    private m_gatherFeatureIds: boolean = true;
+    private m_gatherFeatureAttributes: boolean = false;
     private m_createTileInfo: boolean = false;
     private m_gatherRoadSegments: boolean = false;
     private m_skipShortLabels: boolean = true;
+    private m_enableElevationOverlay: boolean = false;
 
+    /** @override */
     connect(): Promise<void> {
         return Promise.resolve();
     }
 
+    /** @override */
     decodeThemedTile(
         data: ArrayBufferLike,
         tileKey: TileKey,
@@ -563,11 +599,12 @@ export class OmvTileDecoder extends ThemedTileDecoder {
             this.m_showMissingTechniques,
             this.m_featureFilter,
             this.m_featureModifier,
-            this.m_gatherFeatureIds,
+            this.m_gatherFeatureAttributes,
             this.m_createTileInfo,
             this.m_gatherRoadSegments,
             this.m_skipShortLabels,
             this.m_storageLevelOffset,
+            this.m_enableElevationOverlay,
             this.languages
         );
 
@@ -578,6 +615,7 @@ export class OmvTileDecoder extends ThemedTileDecoder {
         return Promise.resolve(decodedTile);
     }
 
+    /** @override */
     getTileInfo(
         data: ArrayBufferLike,
         tileKey: TileKey,
@@ -596,11 +634,12 @@ export class OmvTileDecoder extends ThemedTileDecoder {
             this.m_showMissingTechniques,
             this.m_featureFilter,
             this.m_featureModifier,
-            this.m_gatherFeatureIds,
+            this.m_gatherFeatureAttributes,
             this.m_createTileInfo,
             this.m_gatherRoadSegments,
             this.m_skipShortLabels,
             this.m_storageLevelOffset,
+            this.m_enableElevationOverlay,
             this.languages
         );
 
@@ -611,8 +650,14 @@ export class OmvTileDecoder extends ThemedTileDecoder {
         return Promise.resolve(tileInfo);
     }
 
-    configure(styleSet: StyleSet, languages?: string[], options?: OptionsMap): void {
-        super.configure(styleSet, languages, options);
+    /** @override */
+    configure(
+        styleSet: StyleSet,
+        definitions?: Definitions,
+        languages?: string[],
+        options?: OptionsMap
+    ): void {
+        super.configure(styleSet, definitions, languages, options);
 
         if (options) {
             const omvOptions = options as OmvDecoderOptions;
@@ -638,8 +683,8 @@ export class OmvTileDecoder extends ThemedTileDecoder {
                 }
             }
 
-            if (omvOptions.gatherFeatureIds !== undefined) {
-                this.m_gatherFeatureIds = omvOptions.gatherFeatureIds === true;
+            if (omvOptions.gatherFeatureAttributes !== undefined) {
+                this.m_gatherFeatureAttributes = omvOptions.gatherFeatureAttributes === true;
             }
             if (omvOptions.createTileInfo !== undefined) {
                 this.m_createTileInfo = omvOptions.createTileInfo === true;
@@ -649,6 +694,9 @@ export class OmvTileDecoder extends ThemedTileDecoder {
             }
             if (omvOptions.skipShortLabels !== undefined) {
                 this.m_skipShortLabels = omvOptions.skipShortLabels;
+            }
+            if (omvOptions.enableElevationOverlay !== undefined) {
+                this.m_enableElevationOverlay = omvOptions.enableElevationOverlay;
             }
         }
         if (languages !== undefined) {

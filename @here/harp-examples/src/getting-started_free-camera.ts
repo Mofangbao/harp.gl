@@ -9,17 +9,17 @@ import { GeoCoordinates, webMercatorTilingScheme } from "@here/harp-geoutils";
 import { MapControls } from "@here/harp-map-controls";
 import {
     CopyrightElementHandler,
-    CopyrightInfo,
     MapView,
     MapViewEventNames,
-    MapViewOptions
+    MapViewOptions,
+    MapViewUtils
 } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import * as THREE from "three";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 // Import the gesture handlers from the three.js additional libraries.
-// The controls are not in common.js they explictly require a
+// The controls are not in common.js they explicitly require a
 // global instance of THREE and they must be imported only for their
 // side effect.
 import "three/examples/js/controls/TrackballControls";
@@ -69,8 +69,12 @@ export namespace FreeCameraAppDebuggingToolExample {
         constructor(readonly options: FreeCameraAppOptions) {
             this.mapView = new MapView(options);
             this.mapView.fog.enabled = false;
+            // Set the view over Geneva.
+            const startLocation = new GeoCoordinates(46.207, 6.147);
+            this.mapView.lookAt(startLocation, 2000);
 
             this.mapControls = new MapControls(this.mapView);
+            this.mapControls.maxTiltAngle = 90;
             this.mapControls.enabled = false;
 
             CopyrightElementHandler.install("copyrightNotice", this.mapView);
@@ -96,21 +100,13 @@ export namespace FreeCameraAppDebuggingToolExample {
          * user is seeing (`V`).
          */
         start() {
-            const hereCopyrightInfo: CopyrightInfo = {
-                id: "here.com",
-                year: new Date().getFullYear(),
-                label: "HERE",
-                link: "https://legal.here.com/terms"
-            };
-            const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
-
             const omvDataSource = new OmvDataSource({
                 baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
                 apiFormat: APIFormat.XYZOMV,
                 styleSetName: "tilezen",
                 maxZoomLevel: 17,
                 authenticationCode: accessToken,
-                copyrightInfo: copyrights
+                copyrightInfo
             });
 
             const debugTileDataSource = new DebugTileDataSource(webMercatorTilingScheme);
@@ -125,13 +121,19 @@ export namespace FreeCameraAppDebuggingToolExample {
             const pointOfView = new THREE.PerspectiveCamera(
                 this.mapView.camera.fov,
                 this.mapView.canvas.width / this.mapView.canvas.height,
-                0.1,
-                4000000
+                100,
+                400000
             ); // use an arbitrary large distance for the far plane.
 
             this.mapView.scene.add(pointOfView);
 
-            pointOfView.position.set(0, -1500, 1500);
+            // Setup relative to eye camera which is actually used in
+            // map view to render tiles thus increasing data accuracy.
+            const cameraRelativeToEye = new THREE.PerspectiveCamera();
+
+            this.mapView.scene.add(cameraRelativeToEye);
+
+            pointOfView.position.set(0, -4000, 2700);
 
             this.mapView.pointOfView = pointOfView;
 
@@ -139,7 +141,38 @@ export namespace FreeCameraAppDebuggingToolExample {
                 pointOfView,
                 this.mapView.canvas
             );
-            transformControls.attach(this.mapView.camera);
+            transformControls.setSpace("world");
+            transformControls.attach(cameraRelativeToEye);
+
+            const applyTransformControls = () => {
+                // Apply helper camera offset to main (map view) camera.
+                this.mapView.camera.position.add(cameraRelativeToEye.position);
+                // Make sure that the pitch limit constraint is preserved
+                const ypr = MapViewUtils.extractAttitude(this.mapView, cameraRelativeToEye);
+                ypr.pitch = Math.max(
+                    Math.min(ypr.pitch, THREE.Math.degToRad(this.mapControls.maxTiltAngle)),
+                    0
+                );
+                // Finally apply rotation from transformation gizmo.
+                MapViewUtils.setRotation(
+                    this.mapView,
+                    THREE.Math.radToDeg(ypr.yaw),
+                    THREE.Math.radToDeg(ypr.pitch)
+                );
+                // Reset RTE camera orientation according to constraints applied.
+                cameraRelativeToEye.copy(this.mapView.camera);
+                // Reset RTE camera position to origin.
+                cameraRelativeToEye.position.setScalar(0);
+                transformControls.update();
+            };
+            applyTransformControls();
+
+            const applyMapControls = () => {
+                cameraRelativeToEye.copy(this.mapView.camera, true);
+                cameraRelativeToEye.position.setScalar(0);
+                transformControls.update();
+            };
+
             transformControls.addEventListener("mouseDown", () => {
                 trackball.enabled = false;
             });
@@ -147,12 +180,13 @@ export namespace FreeCameraAppDebuggingToolExample {
                 trackball.enabled = true;
             });
             transformControls.addEventListener("objectChange", () => {
+                applyTransformControls();
                 this.mapView.update();
             });
 
             this.mapView.scene.add(transformControls);
 
-            const cameraHelper = new THREE.CameraHelper(this.mapView.camera);
+            const cameraHelper = new THREE.CameraHelper(cameraRelativeToEye);
 
             // Set the renderOrder to an arbitrary large number, just to be sure that the camera
             // helpers are rendered on top of the map objects.
@@ -167,6 +201,7 @@ export namespace FreeCameraAppDebuggingToolExample {
                 pointOfView,
                 this.mapView.canvas
             );
+            (trackball.target as THREE.Vector3).set(0, 0, -2000);
             trackball.staticMoving = true;
             trackball.rotateSpeed = 3.0;
             trackball.zoomSpeed = 4.0;
@@ -186,6 +221,7 @@ export namespace FreeCameraAppDebuggingToolExample {
                 this.helpers.forEach(helper => helper.update());
             });
 
+            window.focus();
             window.addEventListener("resize", () => {
                 const { width, height } = this.mapView.canvas;
                 pointOfView.aspect = width / height;
@@ -193,23 +229,37 @@ export namespace FreeCameraAppDebuggingToolExample {
                 this.mapView.update();
             });
 
-            window.top.addEventListener("keydown", event => {
+            window.addEventListener("keydown", event => {
                 switch (event.code) {
                     case "KeyT":
                         transformControls.setMode("translate");
+                        // Allow translations at any axis.
+                        transformControls.showX = true;
+                        transformControls.showY = true;
+                        transformControls.showZ = true;
                         this.mapView.update();
                         break;
                     case "KeyR":
                         transformControls.setMode("rotate");
+                        // Only pitch and yaw may be adjusted.
+                        transformControls.showX = true;
+                        transformControls.showY = false;
+                        transformControls.showZ = true;
                         this.mapView.update();
                         break;
                     case "KeyV":
                         if (this.mapView.pointOfView !== undefined) {
                             this.mapView.pointOfView = undefined;
                             this.mapControls.enabled = true;
+                            transformControls.enabled = false;
+                            trackball.enabled = false;
+                            applyTransformControls();
                         } else {
                             this.mapView.pointOfView = pointOfView;
                             this.mapControls.enabled = false;
+                            transformControls.enabled = true;
+                            trackball.enabled = true;
+                            applyMapControls();
                         }
                         this.mapView.update();
                         break;
@@ -234,14 +284,12 @@ Press 'V' to change the scene point of view<br>`;
         document.body.appendChild(message);
 
         const canvas = document.getElementById("mapCanvas") as HTMLCanvasElement;
-        const geoCenter = new GeoCoordinates(52.518611, 13.376111);
 
         // snippet:harp_gl_freecamera_app_0.ts
         const app = new FreeCameraApp({
             decoderUrl: "./decoder.bundle.js",
             canvas,
-            theme: "./resources/berlin_tilezen_base.json",
-            geoCenter
+            theme: "./resources/berlin_tilezen_base.json"
         });
 
         app.start();

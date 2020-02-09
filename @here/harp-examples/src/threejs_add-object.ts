@@ -40,20 +40,40 @@ export namespace ThreejsAddSimpleObject {
     // snippet:harp_gl_threejs_add_simple_object_0.ts
     const scale = 100;
     const geometry = new THREE.BoxGeometry(1 * scale, 1 * scale, 1 * scale);
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x00ff00fe
+    const prePassMaterial = new THREE.MeshStandardMaterial({
+        color: "#ff00fe",
+        opacity: 0.3,
+        depthTest: false,
+        transparent: true
     });
-    function createPinkCube(): MapAnchor<THREE.Mesh> {
+    const material = new THREE.MeshStandardMaterial({
+        color: "#ff00fe",
+        opacity: 0.9,
+        transparent: true
+    });
+    function createPinkCube(): MapAnchor<THREE.Object3D> {
+        // To avoid not seeing the cube at all if it is fully behind the buildings
+        // and also to have some nice visuals if it is partially occluded we
+        // render two passes:
+        // 1. render the cube semi-transparent w/o depth test (renders entire cube)
+        // 2. render the cube almost opaque w/ depth test (renders only un-occluded part)
+        const cube = new THREE.Object3D();
+
+        const prePassMesh = new THREE.Mesh(geometry, prePassMaterial);
+        prePassMesh.renderOrder = Number.MAX_SAFE_INTEGER - 1;
+        cube.add(prePassMesh);
+
         const mesh = new THREE.Mesh(geometry, material);
-        // Make sure the cube overlaps everything else, is completely arbitrary.
         mesh.renderOrder = Number.MAX_SAFE_INTEGER;
-        return mesh;
+        cube.add(mesh);
+        return cube;
     }
     // end:harp_gl_threejs_add_simple_object_0.ts
 
     // Create a new MapView for the HTMLCanvasElement of the given id.
     function addMouseEventListener(mapView: MapView) {
         const canvas = mapView.canvas;
+        mapView.zoomLevel = 15.5;
 
         // tslint:disable:no-unused-expression
         new LongPressHandler(canvas, event => {
@@ -63,6 +83,8 @@ export namespace ThreejsAddSimpleObject {
             if (geoPosition === null) {
                 return;
             }
+            // Add somealtitude so that the cube is standing on the ground.
+            geoPosition.altitude = 50;
             // end:harp_gl_threejs_add_simple_object_1.ts
 
             // snippet:harp_gl_threejs_add_simple_object_2.ts
@@ -79,12 +101,16 @@ export namespace ThreejsAddSimpleObject {
     }
 
     const message = document.createElement("div");
-    message.innerHTML = `Long click to add a ${scale}m wide cube to scene.`;
+    message.innerHTML = `Long click to add a ${scale}m wide cube to the scene.`;
+    message.style.cssText = `
+        color: #000;
+        width: 80%;
+        left: 50%;
+        position: relative;
+        margin-left: -40%;
+        font-size: 15px;
+    `;
 
-    message.style.position = "absolute";
-    message.style.cssFloat = "right";
-    message.style.top = "10px";
-    message.style.right = "10px";
     document.body.appendChild(message);
 
     addMouseEventListener(HelloWorldExample.mapView);

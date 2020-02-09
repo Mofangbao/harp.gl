@@ -7,7 +7,15 @@ import { TileKey } from "@here/harp-geoutils";
 import { assert } from "@here/harp-utils";
 
 import { Env, MapEnv, Value } from "./Expr";
-import { IndexedTechnique, Technique, TextTechnique } from "./Techniques";
+import { makeDecodedTechnique } from "./StyleSetEvaluator";
+import { AttrEvaluationContext, evaluateTechniqueAttr } from "./TechniqueAttr";
+import {
+    IndexedTechnique,
+    isLineMarkerTechnique,
+    isPoiTechnique,
+    isTextTechnique,
+    Technique
+} from "./Techniques";
 
 /**
  * Defines a map tile metadata.
@@ -17,6 +25,15 @@ export interface TileInfo {
     readonly setupTime: number;
     readonly transferList?: ArrayBuffer[];
     readonly numBytes: number;
+}
+
+/**
+ * Represents a feature group type for tile info.
+ */
+export enum FeatureGroupType {
+    Point,
+    Line,
+    Polygon
 }
 
 /**
@@ -143,8 +160,9 @@ export class LineFeatureGroup extends FeatureGroup {
      * An array of object defined by the user. Certain elements may be `undefined` (if this line
      * feature is not a road, or if the object for that feature is undefined).
      */
-    userData?: Array<{} | undefined> = [];
+    userData: Array<{} | undefined> = [];
 
+    /** @override */
     getNumBytes(): number {
         return (
             super.getNumBytes() +
@@ -211,6 +229,7 @@ export class PolygonFeatureGroup extends FeatureGroup {
         this.innerRingStartIndex.length = startSize;
     }
 
+    /** @override */
     getNumBytes(): number {
         return (
             super.getNumBytes() +
@@ -401,7 +420,7 @@ export namespace ExtendedTileInfo {
     }
 
     /**
-     * Determine the text string of the (OMV) feature. It implements the special handling required
+     * Determine the name of (OMV) feature. It implements the special handling required
      * to determine the text content of a feature from its tags, which are passed in as the `env`.
      *
      * @param env Environment containing the tags from the (OMV) feature.
@@ -412,8 +431,8 @@ export namespace ExtendedTileInfo {
      */
     export function getFeatureName(
         env: Env,
-        useAbbreviation: boolean,
-        useIsoCode: boolean,
+        useAbbreviation?: boolean,
+        useIsoCode?: boolean,
         languages?: string[]
     ): string | undefined {
         let name;
@@ -443,6 +462,42 @@ export namespace ExtendedTileInfo {
         }
         return undefined;
     }
+
+    /**
+     * Determine the text string of the map feature. It implements the special handling required
+     * to determine the text content of a feature from its tags, which are passed in as the `env`.
+     *
+     * @param feature Feature, including properties from the (OMV) feature.
+     * @param technique technique defining how text should be created from feature
+     * @param languages List of languages to use, for example: Specify "en" to use the tag "name_en"
+     *                  as the text of the string. Order reflects priority.
+     */
+    export function getFeatureText(
+        context: Env | AttrEvaluationContext,
+        technique: Technique,
+        languages?: string[]
+    ): string | undefined {
+        let useAbbreviation: boolean | undefined;
+        let useIsoCode: boolean | undefined;
+        const env = context instanceof Env ? context : context.env;
+        if (
+            isTextTechnique(technique) ||
+            isPoiTechnique(technique) ||
+            isLineMarkerTechnique(technique)
+        ) {
+            if (technique.text !== undefined) {
+                return evaluateTechniqueAttr(context, technique.text);
+            }
+            if (technique.label !== undefined) {
+                const name = env.lookup(technique.label);
+                return typeof name === "string" ? name : undefined;
+            }
+            useAbbreviation = technique.useAbbreviation;
+            useIsoCode = technique.useIsoCode;
+        }
+
+        return getFeatureName(env, useAbbreviation, useIsoCode, languages);
+    }
 }
 
 /**
@@ -468,11 +523,7 @@ export class ExtendedTileInfoWriter {
      * @param storeExtendedTags Pass `true` if feature data like `layer`, `class`or `type` should
      *          be stored for every feature.
      */
-    constructor(
-        readonly tileInfo: ExtendedTileInfo,
-        readonly storeExtendedTags: boolean,
-        private languages?: string[]
-    ) {}
+    constructor(readonly tileInfo: ExtendedTileInfo, readonly storeExtendedTags: boolean) {}
 
     /**
      * Adds a [[Technique]] to the catalog of techniques. Individual techniques have a `_index` file
@@ -488,25 +539,12 @@ export class ExtendedTileInfoWriter {
             return infoTileTechniqueIndex;
         }
 
+        const decodedTechnique = makeDecodedTechnique(technique);
+
         infoTileTechniqueIndex = this.tileInfo.techniqueCatalog.length;
+        this.techniqueIndexMap.set(decodedTechnique._index, infoTileTechniqueIndex);
+        this.tileInfo.techniqueCatalog.push(decodedTechnique);
 
-        // add a new technique. Select the subset of features that should be stored (e.g., _index is
-        // not)
-        const storedTechnique = {} as any;
-
-        Object.getOwnPropertyNames(technique).forEach(property => {
-            if (!property.startsWith("_")) {
-                storedTechnique[property] = (technique as any)[property];
-            }
-        });
-
-        // Keep the index to identify the original technique later.
-        storedTechnique._index = technique._index;
-        storedTechnique._styleSetIndex = technique._styleSetIndex;
-
-        this.techniqueIndexMap.set(technique._index, infoTileTechniqueIndex);
-
-        this.tileInfo.techniqueCatalog.push(storedTechnique);
         return infoTileTechniqueIndex;
     }
 
@@ -524,24 +562,16 @@ export class ExtendedTileInfoWriter {
      */
     addFeature(
         featureGroup: FeatureGroup,
-        technique: Technique,
         env: MapEnv,
         featureId: number | undefined,
+        featureText: string | undefined,
         infoTileTechniqueIndex: number,
-        isPolygonGroup: boolean
+        featureGroupType: FeatureGroupType
     ) {
         // compute name/label of feature
-        const textTechnique = technique as TextTechnique;
-        const textLabel = textTechnique.label;
-        const useAbbreviation = textTechnique.useAbbreviation as boolean;
-        const useIsoCode = textTechnique.useIsoCode as boolean;
-        const name: Value =
-            typeof textLabel === "string"
-                ? env.lookup(textLabel)
-                : ExtendedTileInfo.getFeatureName(env, useAbbreviation, useIsoCode, this.languages);
         let stringIndex = -1;
-        if (name && typeof name === "string") {
-            stringIndex = this.addText(name);
+        if (featureText !== undefined && featureText.length > 0) {
+            stringIndex = this.addText(featureText);
         }
 
         // add indices into the arrays.
@@ -550,13 +580,19 @@ export class ExtendedTileInfoWriter {
         featureGroup.textIndex[featureGroup.numFeatures] = stringIndex;
         featureGroup.positionIndex[featureGroup.numFeatures] = featureGroup.numPositions;
 
-        // polygons need the extra fields for polygon rings
-        if (isPolygonGroup) {
-            const polygonGroup = featureGroup as PolygonFeatureGroup;
-            assert(polygonGroup.outerRingStartIndex !== undefined);
-            assert(polygonGroup.innerRingStartIndex !== undefined);
-            assert(polygonGroup.innerRingIsOuterContour !== undefined);
-            polygonGroup.outerRingStartIndex[featureGroup.numFeatures] = polygonGroup.groupNumRings;
+        switch (featureGroupType) {
+            case FeatureGroupType.Polygon:
+                // polygons need the extra fields for polygon rings
+                const polygonGroup = featureGroup as PolygonFeatureGroup;
+                assert(polygonGroup.outerRingStartIndex !== undefined);
+                assert(polygonGroup.innerRingStartIndex !== undefined);
+                assert(polygonGroup.innerRingIsOuterContour !== undefined);
+                polygonGroup.outerRingStartIndex[featureGroup.numFeatures] =
+                    polygonGroup.groupNumRings;
+                break;
+            case FeatureGroupType.Line:
+                (featureGroup as LineFeatureGroup).userData[featureGroup.numFeatures] = env.entries;
+                break;
         }
 
         // store the extra feature fields
@@ -658,25 +694,29 @@ export class ExtendedTileInfoWriter {
         ExtendedTileInfo.finish(this.tileInfo);
     }
 
-    private addText(name: Value): number {
+    private addText(name: Value | undefined): number {
         return this.addStringValue(name, this.tileInfo.textCatalog, this.stringMap);
     }
 
-    private addLayer(name: Value): number {
+    private addLayer(name: Value | undefined): number {
         return this.addStringValue(name, this.tileInfo.layerCatalog!, this.layerMap);
     }
 
-    private addClass(name: Value): number {
+    private addClass(name: Value | undefined): number {
         return this.addStringValue(name, this.tileInfo.classCatalog!, this.classMap);
     }
 
-    private addType(name: Value): number {
+    private addType(name: Value | undefined): number {
         return this.addStringValue(name, this.tileInfo.typeCatalog!, this.typeMap);
     }
 
     // Add a string to the strings catalog. Returns index into the catalog.
-    private addStringValue(str: Value, catalog: string[], map: Map<string, number>): number {
-        if (str === undefined) {
+    private addStringValue(
+        str: Value | undefined,
+        catalog: string[],
+        map: Map<string, number>
+    ): number {
+        if (str === undefined || str === null) {
             return -1;
         }
         const name = str.toString();

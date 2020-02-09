@@ -1,6 +1,6 @@
 {
     "name": "@here/harp-materials",
-    "version": "0.3.3",
+    "version": "0.12.0",
     "description": "harp.gl Materials defining the appearance of objects",
     "main": "index.js",
     "typings": "index",
@@ -20,20 +20,21 @@
     },
     "license": "Apache-2.0",
     "dependencies": {
-        "@here/harp-utils": "^0.2.7"
+        "@here/harp-datasource-protocol": "^0.12.0",
+        "@here/harp-utils": "^0.12.0"
     },
     "devDependencies": {
         "@types/chai": "^4.1.2",
         "@types/mocha": "^5.2.7",
         "chai": "^4.0.2",
-        "cross-env": "^5.2.0",
+        "cross-env": "^6.0.3",
         "mocha": "^6.1.4",
         "source-map-support": "^0.5.2",
-        "three": "^0.105.2",
-        "typescript": "^3.5.2"
+        "three": "^0.112.1",
+        "typescript": "^3.7.2"
     },
     "peerDependencies": {
-        "three": "^0.105.2"
+        "three": "^0.112.1"
     },
     "publishConfig": {
         "access": "public"

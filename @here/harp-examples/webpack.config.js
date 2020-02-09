@@ -13,9 +13,10 @@ const CopyWebpackPlugin = require("copy-webpack-plugin");
 const prepareOnly = process.env["PREPARE_ONLY"] === "true";
 
 const harpMapThemePath = path.dirname(require.resolve("@here/harp-map-theme/package.json"));
-const harpFontResourcesPath = path.dirname(
-    require.resolve("@here/harp-fontcatalog/package.json")
-);
+const harpFontResourcesPath = path.dirname(require.resolve("@here/harp-fontcatalog/package.json"));
+
+const isProduction = process.env.NODE_ENV === "production";
+const harpBundleSuffix = isProduction ? ".min" : "";
 
 function resolveOptional(path, message) {
     try {
@@ -32,10 +33,15 @@ function resolveOptional(path, message) {
 const commonConfig = {
     context: __dirname,
     devtool: prepareOnly ? undefined : "source-map",
-    externals: {
-        three: "THREE",
-        fs: "undefined"
-    },
+    externals: [
+        {
+            three: "THREE",
+            fs: "undefined"
+        },
+        function(context, request, callback) {
+            return /three\.module\.js$/.test(request) ? callback(null, "THREE") : callback();
+        }
+    ],
     resolve: {
         extensions: [".webpack.js", ".web.ts", ".ts", ".tsx", ".web.js", ".js"],
         alias: {
@@ -174,10 +180,10 @@ const assets = [
             return content.toString().replace("{{EXAMPLES}}", JSON.stringify(exampleDefs, true, 4));
         }
     },
-    ...[path.join(__dirname, "src")].map(srcDir => ({
-        from: path.join(srcDir, "*.{ts,tsx,html}"),
+    {
+        from: path.join(__dirname, "src", "*.{ts,tsx,html}"),
         to: "src/[name].[ext]"
-    })),
+    },
     path.join(__dirname, "index.html"),
     {
         from: path.join(__dirname, "src/*.html"),
@@ -192,9 +198,23 @@ const assets = [
         toType: "dir"
     },
     require.resolve("three/build/three.min.js"),
-    resolveOptional("@here/harp.gl/dist/harp.js", "bundle examples require `yarn build-bundle`"),
-    resolveOptional("@here/harp.gl/dist/harp-decoders.js")
-].filter(asset => asset); // ignore stuff that is not found
+    {
+        from: resolveOptional(`@here/harp.gl/dist/harp${harpBundleSuffix}.js`, "bundle examples require `yarn build-bundle`"),
+        to: "harp.js"
+    },
+    {
+        from: resolveOptional(`@here/harp.gl/dist/harp-decoders${harpBundleSuffix}.js`),
+        to: "harp-decoders.js"
+    }
+].filter(asset => {
+    if (asset === undefined || asset === null) {
+        return false;
+    } else if (typeof asset === "string") {
+        return true;
+    } else if (typeof asset === "object") {
+        return asset.from;
+    }
+}); // ignore stuff that is not found
 
 browserConfig.plugins.push(
     new CopyWebpackPlugin(assets, { ignore: ["*.npmignore", "*.gitignore"] })

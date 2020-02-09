@@ -9,6 +9,8 @@ import { MapView } from "../MapView";
 import { Tile } from "../Tile";
 import { SimpleTileGeometryLoader, TileGeometryLoader } from "./TileGeometryLoader";
 
+type TileUpdateCallback = (tile: Tile) => void;
+
 /**
  * Manages the content (the geometries) of a tile. Derived classes allow different strategies that
  * control the sequence in which the geometries of the tile are being loaded.
@@ -94,10 +96,19 @@ export interface TileGeometryManager {
     /**
      * Return all [[GeometryKind]]s that are contained in the tiles.
      *
-     * @param {Tile[]} tiles The
+     * @param {IterableIterator<Tile>} tiles The
      * @returns {GeometryKindSet}
      */
-    getAvailableKinds(tiles: Tile[]): GeometryKindSet;
+    getAvailableKinds(tiles: IterableIterator<Tile>): GeometryKindSet;
+
+    /**
+     * Sets a callback that will be called for every updated tile on [[updateTiles]].
+     *
+     * @param {TileUpdateCallback} callback The callback that will be called after a tile has been
+     * updated, passing the updated tile as argument. If `undefined`, a previously set callback will
+     * be cleared.
+     */
+    setTileUpdateCallback(callback?: TileUpdateCallback): void;
 }
 
 /**
@@ -139,6 +150,8 @@ export abstract class TileGeometryManagerBase implements TileGeometryManager {
     protected enabledKinds: GeometryKindSet = new GeometryKindSet();
     protected disabledKinds: GeometryKindSet = new GeometryKindSet();
     protected hiddenKinds: GeometryKindSet = new GeometryKindSet();
+
+    protected m_tileUpdateCallback: TileUpdateCallback | undefined;
 
     /**
      * Optimization for evaluation in `update()` method. Only if a kind is hidden/unhidden, the
@@ -205,7 +218,7 @@ export abstract class TileGeometryManagerBase implements TileGeometryManager {
         }
     }
 
-    getAvailableKinds(tiles: Tile[]): GeometryKindSet {
+    getAvailableKinds(tiles: IterableIterator<Tile>): GeometryKindSet {
         const visibleKinds: GeometryKindSet = new GeometryKindSet();
         for (const tile of tiles) {
             const geometryLoader = tile.tileGeometryLoader as TileGeometryLoader;
@@ -227,7 +240,9 @@ export abstract class TileGeometryManagerBase implements TileGeometryManager {
      *
      * @param {Tile[]} tiles List of [[Tiles]] to process the visibility status of.
      */
-    updateTileObjectVisibility(tiles: Tile[]): void {
+    updateTileObjectVisibility(tiles: Tile[]): boolean {
+        let needUpdate = false;
+
         for (const tile of tiles) {
             if (tile.objects.length === 0 || tile.visibilityCounter === this.visibilityCounter) {
                 continue;
@@ -238,10 +253,17 @@ export abstract class TileGeometryManagerBase implements TileGeometryManager {
                 const geometryKind: GeometryKind[] | undefined =
                     object.userData !== undefined ? object.userData.kind : undefined;
                 if (geometryKind !== undefined) {
-                    object.visible = !geometryKind.some(kind => this.hiddenKinds.has(kind));
+                    const nowVisible = !geometryKind.some(kind => this.hiddenKinds.has(kind));
+                    needUpdate = needUpdate || object.visible !== nowVisible;
+                    object.visible = nowVisible;
                 }
             }
         }
+        return needUpdate;
+    }
+
+    setTileUpdateCallback(callback?: TileUpdateCallback): void {
+        this.m_tileUpdateCallback = callback;
     }
 
     protected incrementVisibilityCounter(): number {
@@ -310,10 +332,14 @@ export class SimpleTileGeometryManager extends TileGeometryManagerBase {
         super(mapView);
     }
 
+    /** @override */
     initTile(tile: Tile): void {
-        tile.tileGeometryLoader = new SimpleTileGeometryLoader(tile);
+        if (tile.dataSource.useGeometryLoader) {
+            tile.tileGeometryLoader = new SimpleTileGeometryLoader(tile);
+        }
     }
 
+    /** @override */
     updateTiles(tiles: Tile[]): void {
         for (const tile of tiles) {
             const geometryLoader = tile.tileGeometryLoader as TileGeometryLoader;
@@ -322,11 +348,16 @@ export class SimpleTileGeometryManager extends TileGeometryManagerBase {
                     this.enableFilterByKind ? this.enabledGeometryKinds : undefined,
                     this.enableFilterByKind ? this.disabledGeometryKinds : undefined
                 );
+                if (this.m_tileUpdateCallback) {
+                    this.m_tileUpdateCallback(tile);
+                }
             }
         }
 
         // If the visibility status of the kinds changed since the last update, the new visibility
         // status is applied (again).
-        this.updateTileObjectVisibility(tiles);
+        if (this.updateTileObjectVisibility(tiles)) {
+            this.mapView.update();
+        }
     }
 }

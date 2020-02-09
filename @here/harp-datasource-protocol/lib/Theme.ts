@@ -5,9 +5,12 @@
  */
 
 import { Vector3Like } from "@here/harp-geoutils/lib/math/Vector3Like";
+import { isJsonExpr, JsonExpr } from "./Expr";
+import { isInterpolatedPropertyDefinition } from "./InterpolatedProperty";
 import {
+    BaseTechniqueParams,
     BasicExtrudedLineTechniqueParams,
-    DashedLineTechniqueParams,
+    DynamicProperty,
     ExtrudedPolygonTechniqueParams,
     FillTechniqueParams,
     MarkerTechniqueParams,
@@ -30,6 +33,14 @@ export interface Theme {
      * The URI of the JSON schema describing themes.
      */
     $schema?: string;
+
+    /**
+     * The base `Theme`s or `theme` URLs to extend.
+     *
+     * If used, base themes are loaded first, and then all the properties from inherited theme
+     * overwrite these defined in base theme.
+     */
+    extends?: string | Theme | Array<string | Theme>;
 
     /**
      * Actual URL the theme has been loaded from.
@@ -63,6 +74,11 @@ export interface Theme {
     fog?: Fog;
 
     /**
+     * The definitions exported by these theme.
+     */
+    definitions?: Definitions;
+
+    /**
      * Map styles available for datasources used to render the map.
      */
     styles?: Styles;
@@ -94,18 +110,274 @@ export interface Theme {
 }
 
 /**
- * A dictionary of [[Styles]]s.
+ * A type representing HARP themes with all the styleset declarations
+ * grouped in one [[Array]].
+ *
+ * @internal This type will merge with [[Theme]].
  */
-export interface Styles {
-    [styleSetName: string]: StyleSet;
+export type FlatTheme = Omit<Theme, "styles"> & {
+    /**
+     * The style rules used to render the map.
+     */
+    styles?: StyleSet;
+};
+
+/**
+ * Checks if the given definition implements the [[BoxedDefinition]] interface.
+ */
+export function isBoxedDefinition(def: Definition): def is BoxedDefinition {
+    const bdef = def as BoxedDefinition;
+    return (
+        typeof bdef === "object" &&
+        bdef !== null &&
+        (typeof bdef.type === "string" || typeof bdef.type === "undefined") &&
+        (typeof bdef.value === "string" ||
+            typeof bdef.value === "number" ||
+            typeof bdef.value === "boolean" ||
+            isInterpolatedPropertyDefinition(bdef.value) ||
+            isJsonExpr(bdef.value))
+    );
+}
+
+export function isLiteralDefinition(def: Definition): def is LiteralValue {
+    return typeof def === "string" || typeof def === "number" || typeof def === "boolean";
 }
 
 /**
- * An array of [[Style]]s that are used together to define how a [[DataSource]] should be rendered.
- * `StyleSet`s are applied to sources providing vector tiles via their method `setStyleSet`. This
- * is also handle internally when a whole theme is passed to a [[MapView]] via `mapview.theme`.
+ * Value definition commons.
  */
-export type StyleSet = Style[];
+export interface BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type?: string;
+
+    /**
+     * The description of the definition.
+     */
+    description?: string;
+}
+
+/**
+ * Possible types of unboxed literal values carried by [[Definition]].
+ */
+export type LiteralValue = string | number | boolean;
+
+/**
+ * Boxed definition without type.
+ */
+export interface BoxedAnyDefinition extends BaseValueDefinition {
+    /**
+     * The value of the definition.
+     */
+    value: LiteralValue | JsonExpr;
+}
+
+/**
+ * A boxed boolean value definition.
+ */
+export interface BoxedBooleanDefinition extends BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type: "boolean";
+
+    /**
+     * The value of the definition.
+     */
+    value: DynamicProperty<boolean>;
+}
+
+/**
+ * A boxed numerical value definition.
+ */
+export interface BoxedNumericDefinition extends BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type: "number";
+
+    /**
+     * The value of the definition.
+     */
+    value: DynamicProperty<number>;
+}
+
+/**
+ * A boxed string value definition.
+ */
+export interface BoxedStringDefinition extends BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type: "string";
+
+    /**
+     * The value of the definition.
+     */
+    value: DynamicProperty<string>;
+}
+
+/**
+ * A boxed color value definition.
+ */
+export interface BoxedColorDefinition extends BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type: "color";
+
+    /**
+     * The value of the definition.
+     */
+    value: DynamicProperty<string>;
+}
+
+/**
+ * A boxed selector value definition.
+ */
+export interface BoxedSelectorDefinition extends BaseValueDefinition {
+    /**
+     * The type of the definition.
+     */
+    type: "selector";
+
+    /**
+     * The value of the definition.
+     *
+     * See [[BaseStyle.when]].
+     */
+    value: string | JsonExpr;
+}
+
+/**
+ * A boxed value definition.
+ */
+export type BoxedDefinition =
+    | BoxedAnyDefinition
+    | BoxedBooleanDefinition
+    | BoxedNumericDefinition
+    | BoxedStringDefinition
+    | BoxedColorDefinition
+    | BoxedSelectorDefinition;
+
+/**
+ * Possible values for `definitions` element of [Theme].
+ */
+export type Definition = LiteralValue | JsonExpr | BoxedDefinition | StyleDeclaration;
+
+/**
+ * An array of [[Definition]]s.
+ */
+export interface Definitions {
+    [name: string]: Definition;
+}
+
+/**
+ * Base [StyleSelector] attributes required to match [Style] object against given feature.
+ *
+ * Contains [Style]'s members related to feature matching in [[StyleSetEvaluator]].
+ */
+export interface StyleSelector {
+    /**
+     * Condition that is applied to feature properties to check if given [[Style]] this feature
+     * should emit geometry of this style.
+     *
+     * Conditions are defined using [[Array]]s describing literals, built-in symbols and function
+     * calls:
+     *  - `["has", string]` returns `true` if the given property exists.
+     *  - `["get", string]` returns the value of the given feature property with the given name.
+     *  - `["all", expressions...]` returns `true` if all the sub expressions evaluate to true.
+     *  - `["any", expressions...]` returns `true` if any sub expression evaluates to true.
+     *  - `["in", expression, [literals...]]` returns `true` if the result of evaluating the first
+     *    expression is included in the given `Array` of literals.
+     *  - `["!", expression]` returns `false` if the sub expression evaluates to `true`.
+     *  - `["<", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is less than the result of evaluating the second expression.
+     *  - `[">", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is greater than the result of evaluating the second expression.
+     *  - `["<=", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is less than or equal the result of evaluating the second expression.
+     *  - `[">=", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is greater than or equal the result of evaluating the second expression.
+     *  - `["==", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is equal the result of evaluating the second expression.
+     *  - `["!=", expression, expression]` returns `true` if the result of evaluating the first
+     *    expression is not equal to the result of evaluating the second expression.
+     *  - `["length", expression]` returns the length of the given expression if it evaluates to
+     *    a `string` or an `Array`; otherwise, returns `undefined`.
+     *  - `["~=", expression, expression]` if the expressions evaluate to `string`, returns `true`
+     *    if the `string` obtained from the first expression contains the `string` obtained from the
+     *    second expression; otherwise, returns `undefined`.
+     *  - `["^=", expression, expression]` if the expressions evaluate to `string`, returns `true`
+     *    if the `string` obtained from the first expression starts with the `string` obtained from
+     *    the second expression; otherwise, returns `undefined`.
+     *  - `["$=", expression, expression]` if the expressions evaluate to `string`, returns `true`
+     *    if the `string` obtained from the first expression ends with the `string` obtained from
+     *    the second expression; otherwise, returns `undefined`.
+     */
+    when: string | JsonExpr;
+
+    /**
+     * The layer containing the carto features processed by this style rule.
+     */
+    layer?: string;
+
+    /**
+     * Optional. If `true`, no more matching styles will be evaluated.
+     */
+    final?: boolean;
+}
+
+export type JsonExprReference = ["ref", string];
+
+/**
+ * Checks if the given value is a reference to a definition.
+ *
+ * @param value The value of a technique property.
+ */
+export function isJsonExprReference(value: any): value is JsonExprReference {
+    return (
+        Array.isArray(value) &&
+        value.length === 2 &&
+        value[0] === "ref" &&
+        typeof value[1] === "string"
+    );
+}
+
+/**
+ * Like [[StyleDeclaration]], but without [[Reference]] type.
+ */
+export type ResolvedStyleDeclaration = Style & StyleSelector;
+
+/**
+ * Like [[StyleSet]], but without [[Reference]] type.
+ */
+export type ResolvedStyleSet = ResolvedStyleDeclaration[];
+
+/**
+ * Compound type that merges all raw [Style] with selector arguments from [BaseSelector], optionally
+ * a [[Reference]].
+ */
+export type StyleDeclaration = (Style & StyleSelector) | JsonExpr;
+
+export function isActualSelectorDefinition(def: Definition): def is Style & StyleSelector {
+    const styleDef = def as StyleDeclaration;
+    return (
+        typeof styleDef === "object" &&
+        styleDef !== null &&
+        !Array.isArray(styleDef) &&
+        typeof styleDef.technique === "string"
+    );
+}
+
+/**
+ * An array of [[StyleSelector]]s that are used together to define how a [[DataSource]] should be
+ * rendered. `StyleSet`s are applied to sources providing vector tiles via their method
+ * `setStyleSet`. This is also handle internally when a whole theme is passed to a [[MapView]] via
+ * `mapview.theme`.
+ */
+export type StyleSet = StyleDeclaration[];
 
 /**
  * The object that defines what way an item of a [[DataSource]] should be decoded to assemble a
@@ -119,100 +391,40 @@ export interface BaseStyle {
     description?: string;
 
     /**
-     * Compile-time condition.
-     *
-     * Conditions are defined using [[Array]]s describing literals, built-in
-     * symbols and function calls.
-     *  - `["has", string]` returns `true` if the given property exists.
-     *  - `["get", string]` returns the value of the given property with the
-     *    given name.
-     *  - `["all", expressions...]` returns `true` if all the sub expressions
-     *    evaluate to true.
-     *  - `["any", expressions...]` returns `true` if any sub expression
-     *    evaluates to true.
-     *  - `["in", expression, [literals...]]` returns `true` if the result of
-     *    evaluating the first expression is included in the given `Array` of
-     *    literals.
-     *  - `["!", expression]` returns `false` if the sub expression evaluates to
-     *    `true`.
-     *  - `["<", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is less than the result of evaluating
-     *    the second expression.
-     *  - `[">", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is greater than the result of
-     *    evaluating the second expression.
-     *  - `["<=", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is less than or equal the result of
-     *    evaluating the second expression.
-     *  - `[">=", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is greater than or equal the result of
-     *    evaluating the second expression.
-     *  - `["==", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is equal the result of evaluating the
-     *    second expression.
-     *  - `["!=", expression, expression]` returns `true` if the result of
-     *    evaluating the first expression is not equal to the result of
-     *    evaluating the second expression.
-     *  - `["length", expression]` returns the length of the given expression if
-     *    it evaluates to a `string` or an `Array`; otherwise, returns
-     *    `undefined`.
-     *  - `["~=", expression, expression]` if the expressions evaluate to
-     *    `string`, returns `true` if the `string` obtained from the first
-     *    expression contains the `string` obtained from the second expression;
-     *    otherwise, returns `undefined`.
-     *  - `["^=", expression, expression]` if the expressions evaluate to
-     *    `string`, returns `true` if the `string` obtained from the first
-     *    expression starts with the `string` obtained from the second
-     *    expression; otherwise, returns `undefined`.
-     *  - `["$=", expression, expression]` if the expressions evaluate to
-     *    `string`, returns `true` if the `string` obtained from the first
-     *    expression ends with the `string` obtained from the second expression;
-     *    otherwise, returns `undefined`.
+     * The style set referenced by this styling rule.
      */
-    when: unknown[] | string;
+    styleSet?: string;
 
     /**
-     * Technique name. Must be one of `"line"`, `"fill"`, `"solid-line"`, `"dashed-line"`,
-     * `"extruded-line"`, `"extruded-polygon"`, `"text"`, or `"none"`.
+     * Technique name. See the classes extending from this class to determine what possible
+     * techniques are possible, includes `"line"`, `"fill"`, `"solid-line"`, `"extruded-line"`,
+     * `"extruded-polygon"`, `"text"`, `"none"`.
      */
     technique?: string;
 
     /**
-     * Specify `renderOrder` of object.
+     * Specify `renderOrder` of value.
+     *
+     * @default If not specified in style file, `renderOrder` will be assigned with monotonically
+     * increasing values according to style position in file.
      */
-    renderOrder?: number;
+    renderOrder?: number | JsonExpr;
 
     /**
-     * Property that is used to hold the z-order delta.
+     * Minimal zoom level. If the current zoom level is smaller, the technique will not be used.
      */
-    renderOrderBiasProperty?: string;
+    minZoomLevel?: number | JsonExpr;
 
     /**
-     * Minimum and maximum z-order delta values.
+     * Maximum zoom level. If the current zoom level is larger, the technique will not be used.
      */
-    renderOrderBiasRange?: [number, number];
-
-    /**
-     * Z-order group. For example: used to set same render order for all roads
-     * to be able to use the z-order delta when drawing tunnels or bridges over or under the roads.
-     */
-    renderOrderBiasGroup?: string;
-
-    /**
-     * Optional. If `true`, no more matching styles will be evaluated.
-     */
-    final?: boolean;
+    maxZoomLevel?: number | JsonExpr;
 
     /**
      * Optional. If `true`, no IDs will be saved for the geometry this style creates. Default is
      * `false`.
      */
     transient?: boolean;
-
-    /**
-     * Array of substyles.
-     */
-    styles?: StyleSet;
 
     /**
      * Optional: If `true`, the objects with matching `when` statement will be printed to the
@@ -223,6 +435,8 @@ export interface BaseStyle {
     // TODO: Make pixel units default.
     /**
      * Units in which different size properties are specified. Either `Meter` (default) or `Pixel`.
+     *
+     * @deprecated use "string encoded numerals" as documented in TODO, wher eis the doc ?
      */
     metricUnit?: "Meter" | "Pixel";
 
@@ -253,7 +467,7 @@ export interface BaseStyle {
  *         "label": "New dashed-line",
  *         "description": "Add a new 'dashed-line' Styling Rule",
  *         "body": {
- *             "technique": "dashed-line",
+ *             "technique": "solid-line",
  *             "when": "$1",
  *             "attr": {
  *                 "color": "#${2:fff}",
@@ -440,7 +654,7 @@ export interface BaseStyle {
  * ]
  *
  */
-export type Style =
+export type AllStyles =
     | SquaresStyle
     | CirclesStyle
     | PoiStyle
@@ -448,7 +662,7 @@ export type Style =
     | LineStyle
     | SegmentsStyle
     | SolidLineStyle
-    | DashedLineStyle
+    | LabelRejectionLineStyle
     | FillStyle
     | StandardStyle
     | BasicExtrudedLineStyle
@@ -459,6 +673,43 @@ export type Style =
     | TextTechniqueStyle
     | NoneStyle;
 
+export type Style = AllStyles;
+/**
+ * A dictionary of [[StyleSet]]s.
+ */
+export interface Styles {
+    [styleSetName: string]: StyleSet;
+}
+
+/**
+ * A reference to a style definition.
+ *
+ * Use as value `attrs` to reference value from `definitions`.
+ *
+ * Example of usage:
+ * ```json
+ * {
+ *   "definitions": {
+ *     "roadColor": { "type": "color", "value": "#f00" }
+ *   },
+ *   "styles": { "tilezen": [
+ *      {
+ *       "when": "kind == 'road",
+ *       "technique": "solid-line",
+ *       "attr": {
+ *         "lineColor": { "$ref": "roadColor" }
+ *       }
+ *     }
+ *   ] }
+ * }
+ * ```
+ */
+
+/**
+ * The attributes of a technique.
+ */
+export type Attr<T> = { [P in keyof T]?: T[P] | JsonExpr };
+
 /**
  * Render feature as set of squares rendered in screen space.
  *
@@ -466,7 +717,7 @@ export type Style =
  */
 export interface SquaresStyle extends BaseStyle {
     technique: "squares";
-    attr?: Partial<PointTechniqueParams>;
+    attr?: Attr<PointTechniqueParams>;
 }
 
 /**
@@ -476,7 +727,7 @@ export interface SquaresStyle extends BaseStyle {
  */
 export interface CirclesStyle extends BaseStyle {
     technique: "circles";
-    attr?: Partial<PointTechniqueParams>;
+    attr?: Attr<PointTechniqueParams>;
 }
 
 /**
@@ -486,7 +737,7 @@ export interface CirclesStyle extends BaseStyle {
  */
 export interface PoiStyle extends BaseStyle {
     technique: "labeled-icon";
-    attr?: Partial<MarkerTechniqueParams>;
+    attr?: Attr<MarkerTechniqueParams>;
 }
 
 /**
@@ -496,7 +747,7 @@ export interface PoiStyle extends BaseStyle {
  */
 export interface LineMarkerStyle extends BaseStyle {
     technique: "line-marker";
-    attr?: Partial<MarkerTechniqueParams>;
+    attr?: Attr<MarkerTechniqueParams>;
 }
 
 /**
@@ -505,7 +756,7 @@ export interface LineMarkerStyle extends BaseStyle {
 export interface LineStyle extends BaseStyle {
     technique: "line";
     secondaryRenderOrder?: number;
-    attr?: Partial<MarkerTechniqueParams>;
+    attr?: Attr<MarkerTechniqueParams>;
 }
 
 /**
@@ -513,45 +764,45 @@ export interface LineStyle extends BaseStyle {
  */
 export interface SegmentsStyle extends BaseStyle {
     technique: "segments";
-    attr?: Partial<SegmentsTechniqueParams>;
+    attr?: Attr<SegmentsTechniqueParams>;
 }
 
 export interface SolidLineStyle extends BaseStyle {
-    technique: "solid-line";
+    technique: "solid-line" | "dashed-line";
     secondaryRenderOrder?: number;
-    attr?: Partial<SolidLineTechniqueParams>;
+    attr?: Attr<SolidLineTechniqueParams>;
 }
 
-export interface DashedLineStyle extends BaseStyle {
-    technique: "dashed-line";
-    attr?: Partial<DashedLineTechniqueParams>;
+export interface LabelRejectionLineStyle extends BaseStyle {
+    technique: "label-rejection-line";
+    attr?: Attr<BaseTechniqueParams>;
 }
 
 export interface FillStyle extends BaseStyle {
     technique: "fill";
-    attr?: Partial<FillTechniqueParams>;
+    attr?: Attr<FillTechniqueParams>;
 }
 
 export interface StandardStyle extends BaseStyle {
     technique: "standard";
-    attr?: Partial<StandardTechniqueParams>;
+    attr?: Attr<StandardTechniqueParams>;
 }
 
 export interface TerrainStyle extends BaseStyle {
     technique: "terrain";
-    attr?: Partial<TerrainTechniqueParams>;
+    attr?: Attr<TerrainTechniqueParams>;
 }
 
 export interface BasicExtrudedLineStyle extends BaseStyle {
     technique: "extruded-line";
     shading?: "basic";
-    attr?: Partial<BasicExtrudedLineTechniqueParams>;
+    attr?: Attr<BasicExtrudedLineTechniqueParams>;
 }
 
 export interface StandardExtrudedLineStyle extends BaseStyle {
     technique: "extruded-line";
     shading: "standard";
-    attr?: Partial<StandardExtrudedLineTechniqueParams>;
+    attr?: Attr<StandardExtrudedLineTechniqueParams>;
 }
 
 /**
@@ -559,17 +810,17 @@ export interface StandardExtrudedLineStyle extends BaseStyle {
  */
 export interface ExtrudedPolygonStyle extends BaseStyle {
     technique: "extruded-polygon";
-    attr?: Partial<ExtrudedPolygonTechniqueParams>;
+    attr?: Attr<ExtrudedPolygonTechniqueParams>;
 }
 
 export interface ShaderStyle extends BaseStyle {
     technique: "shader";
-    attr?: Partial<ShaderTechniqueParams>;
+    attr?: Attr<ShaderTechniqueParams>;
 }
 
 export interface TextTechniqueStyle extends BaseStyle {
     technique: "text";
-    attr?: Partial<TextTechniqueParams>;
+    attr?: Attr<TextTechniqueParams>;
 }
 
 export interface NoneStyle extends BaseStyle {

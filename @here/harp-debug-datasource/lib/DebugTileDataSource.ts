@@ -46,13 +46,14 @@ export class DebugTile extends Tile {
     constructor(dataSource: DataSource, tileKey: TileKey) {
         super(dataSource, tileKey);
 
-        const { south, west, north, east } = this.geoBox;
-
+        const tilingScheme = dataSource.getTilingScheme();
+        const worldBox = tilingScheme.boundingBoxGenerator.getWorldBox(tileKey);
+        const projection = tilingScheme.projection;
         const geoCoordinates: GeoCoordinates[] = [
-            new GeoCoordinates(south, west),
-            new GeoCoordinates(south, east),
-            new GeoCoordinates(north, east),
-            new GeoCoordinates(north, west)
+            projection.unprojectPoint(new THREE.Vector3(worldBox.min.x, worldBox.min.y, 0)),
+            projection.unprojectPoint(new THREE.Vector3(worldBox.max.x, worldBox.min.y, 0)),
+            projection.unprojectPoint(new THREE.Vector3(worldBox.max.x, worldBox.max.y, 0)),
+            projection.unprojectPoint(new THREE.Vector3(worldBox.min.x, worldBox.max.y, 0))
         ];
 
         const middlePoint = new THREE.Vector3();
@@ -93,8 +94,11 @@ export class DebugTile extends Tile {
             });
         }
 
-        const text = `(${tileKey.row}, ${tileKey.column}, ${tileKey.level})`;
+        const text = `${tileKey.mortonCode()} (${tileKey.row}, ${tileKey.column}, ${
+            tileKey.level
+        })`;
 
+        textPosition.add(this.center);
         const textElement = new TextElement(
             text,
             textPosition,
@@ -123,19 +127,22 @@ export class DebugTileDataSource extends DataSource {
         this.cacheable = true;
     }
 
+    /** @override */
     getTilingScheme(): TilingScheme {
         return this.m_tilingScheme;
     }
 
+    /** @override */
     getTile(tileKey: TileKey): DebugTile {
         const tile = new DebugTile(this, tileKey);
         return tile;
     }
 
-    shouldRender(zoomLevel: number, tileKey: TileKey): boolean {
+    /** @override */
+    canGetTile(zoomLevel: number, tileKey: TileKey): boolean {
         if (tileKey.level > this.maxDbgZoomLevel) {
             return false;
         }
-        return super.shouldRender(zoomLevel, tileKey);
+        return super.canGetTile(zoomLevel, tileKey);
     }
 }

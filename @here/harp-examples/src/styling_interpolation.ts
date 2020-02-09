@@ -8,9 +8,9 @@ import { Theme } from "@here/harp-datasource-protocol";
 // import { GeoJsonDataProvider } from "@here/harp-geojson-datasource";
 import { GeoCoordinates } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightInfo, MapView } from "@here/harp-mapview";
+import { MapView } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * This example showcases interpolated [[MapView]] techniques.
@@ -21,7 +21,21 @@ export namespace TiledGeoJsonTechniquesExample {
             #mapCanvas {
               top: 0;
             }
+            #info{
+                color: #fff;
+                width: 80%;
+                left: 50%;
+                position: relative;
+                margin: 10px 0 0 -40%;
+                font-size: 15px;
+            }
+            @media screen and (max-width: 700px) {
+                #info{
+                    font-size:11px;
+                }
+            }
         </style>
+        <p id=info>Zoom in and out to smoothly transition between styles.</p>
     `;
 
     const theme: Theme = {
@@ -421,15 +435,12 @@ export namespace TiledGeoJsonTechniquesExample {
             theme
         });
 
-        mapView.renderLabels = false;
-        mapView.geoCenter = new GeoCoordinates(28.595, 77.22, 0);
-        mapView.setCameraGeolocationAndZoom(mapView.geoCenter, 15.2);
+        mapView.setCameraGeolocationAndZoom(new GeoCoordinates(28.595, 77.22, 0), 15.2, 0, 28);
 
         const controls = new MapControls(mapView);
-        controls.setRotation(0, 28);
 
         // Add an UI.
-        const ui = new MapControlsUI(controls);
+        const ui = new MapControlsUI(controls, { zoomLevel: "input" });
         canvas.parentElement!.appendChild(ui.domElement);
 
         window.addEventListener("resize", () => {
@@ -443,20 +454,13 @@ export namespace TiledGeoJsonTechniquesExample {
             }
         });
 
-        const hereCopyrightInfo: CopyrightInfo = {
-            id: "here.com",
-            year: new Date().getFullYear(),
-            label: "HERE",
-            link: "https://legal.here.com/terms"
-        };
-        const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
         const baseMapDataSource = new OmvDataSource({
             baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
             apiFormat: APIFormat.XYZOMV,
             styleSetName: "tilezen",
             maxZoomLevel: 16,
             authenticationCode: accessToken,
-            copyrightInfo: copyrights
+            copyrightInfo
         });
 
         mapView.addDataSource(baseMapDataSource).then(() => {

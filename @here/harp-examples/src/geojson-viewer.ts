@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { StyleSet } from "@here/harp-datasource-protocol";
+import { StyleSet, Theme } from "@here/harp-datasource-protocol";
 import { FeaturesDataSource } from "@here/harp-features-datasource";
-import { GeoCoordinates } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightElementHandler, CopyrightInfo, MapView } from "@here/harp-mapview";
+import { CopyrightElementHandler, MapView } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * In this example we avail ourselves of the [[FeaturesDataSource]] and its `setFromGeoJson` method
@@ -19,15 +18,20 @@ import { accessToken } from "../config";
  */
 export namespace GeoJsonExample {
     const editorWidth = "550px";
-    const map = createBaseMap();
+    const customTheme: Theme = {
+        extends: "resources/berlin_tilezen_night_reduced.json",
+        styles: {
+            geojson: getStyleSet()
+        }
+    };
+
+    const map = createBaseMap(customTheme);
 
     setUpFilePicker();
     setUpEditor();
 
-    const featuresDataSource = new FeaturesDataSource();
-    map.addDataSource(featuresDataSource).then(() => {
-        featuresDataSource.setStyleSet(getStyleSet());
-    });
+    const featuresDataSource = new FeaturesDataSource({ styleSetName: "geojson" });
+    map.addDataSource(featuresDataSource);
 
     function setUpEditor() {
         const editorInput = document.querySelector("#editor textarea") as HTMLTextAreaElement;
@@ -76,7 +80,7 @@ export namespace GeoJsonExample {
                 renderOrder: 10002,
                 attr: {
                     size: 10,
-                    color: "5ad"
+                    color: "#5ad"
                 }
             },
             {
@@ -136,42 +140,34 @@ export namespace GeoJsonExample {
         );
     }
 
-    function createBaseMap(): MapView {
+    function createBaseMap(theme: Theme): MapView {
         document.body.innerHTML += getExampleHTML();
 
         const canvas = document.getElementById("mapCanvas") as HTMLCanvasElement;
         const mapView = new MapView({
             canvas,
-            theme: "resources/berlin_tilezen_night_reduced.json"
+            theme
         });
         mapView.renderLabels = false;
-        mapView.setCameraGeolocationAndZoom(new GeoCoordinates(30, 0), 2);
 
         CopyrightElementHandler.install("copyrightNotice", mapView);
 
         const controls = new MapControls(mapView);
-        const ui = new MapControlsUI(controls);
-        const editorWidthNumber = Math.min(parseInt(editorWidth, undefined), innerWidth * 0.4);
-        ui.domElement.style.right = editorWidthNumber + 10 + "px";
+        const ui = new MapControlsUI(controls, { projectionSwitch: true });
+        const width =
+            innerWidth <= 450 ? 0 : Math.min(parseInt(editorWidth, undefined), innerWidth * 0.4);
+        ui.domElement.style.right = width + 10 + "px";
         canvas.parentElement!.appendChild(ui.domElement);
 
         window.addEventListener("resize", () => {
-            const width =
+            const _width =
                 innerWidth <= 450
                     ? 0
                     : Math.min(parseInt(editorWidth, undefined), innerWidth * 0.4);
             canvas.className = "full";
-            ui.domElement.style.right = width + 10 + "px";
-            mapView.resize(innerWidth - width, innerHeight);
+            ui.domElement.style.right = _width + 10 + "px";
+            mapView.resize(innerWidth - _width, innerHeight);
         });
-
-        const hereCopyrightInfo: CopyrightInfo = {
-            id: "here.com",
-            year: new Date().getFullYear(),
-            label: "HERE",
-            link: "https://legal.here.com/terms"
-        };
-        const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
 
         const baseMap = new OmvDataSource({
             baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
@@ -179,7 +175,7 @@ export namespace GeoJsonExample {
             styleSetName: "tilezen",
             maxZoomLevel: 17,
             authenticationCode: accessToken,
-            copyrightInfo: copyrights
+            copyrightInfo
         });
         mapView.addDataSource(baseMap);
 
@@ -283,7 +279,7 @@ export namespace GeoJsonExample {
                 }
             </style>
             <div id=editor>
-                <button>Update</button>
+                <button style="left:5px;position:absolute;">Update</button>
                 <textarea></textarea>
             </div>
 

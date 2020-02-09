@@ -6,9 +6,9 @@
 
 import { GeoCoordinates } from "@here/harp-geoutils";
 import { MapControls, MapControlsUI } from "@here/harp-map-controls";
-import { CopyrightElementHandler, CopyrightInfo, MapView } from "@here/harp-mapview";
-import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
-import { accessToken } from "../config";
+import { CopyrightElementHandler, MapView } from "@here/harp-mapview";
+import { OmvDataSource } from "@here/harp-omv-datasource";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * MapView initialization sequence enables setting all the necessary elements on a map  and returns
@@ -71,9 +71,15 @@ export namespace HelloWorldExample {
         // end:harp_gl_hello_world_example_0.ts
 
         // snippet:harp_gl_hello_world_example_1.ts
+        // Look at New York.
+        const NY = new GeoCoordinates(40.707, -74.01);
         const map = new MapView({
             canvas,
-            theme: "resources/berlin_tilezen_base.json"
+            theme: "resources/berlin_tilezen_base.json",
+            target: NY,
+            tilt: 50,
+            heading: -20,
+            zoomLevel: 16.1
         });
         // end:harp_gl_hello_world_example_1.ts
 
@@ -82,17 +88,11 @@ export namespace HelloWorldExample {
         // snippet:harp_gl_hello_world_example_map_controls.ts
         // Instantiate the default map controls, allowing the user to pan around freely.
         const mapControls = new MapControls(map);
-        mapControls.maxPitchAngle = 50;
+        mapControls.maxTiltAngle = 50;
         // end:harp_gl_hello_world_example_map_controls.ts
 
-        // snippet:harp_gl_hello_world_example_look_at.ts
-        // Look at New York.
-        const NY = new GeoCoordinates(40.707, -74.01);
-        map.lookAt(NY, 4000, 50, -20);
-        // end:harp_gl_hello_world_example_look_at.ts
-
         // Add an UI.
-        const ui = new MapControlsUI(mapControls);
+        const ui = new MapControlsUI(mapControls, { zoomLevel: "input" });
         canvas.parentElement!.appendChild(ui.domElement);
 
         // snippet:harp_gl_hello_world_example_3.ts
@@ -111,22 +111,15 @@ export namespace HelloWorldExample {
     }
 
     function addOmvDataSource(map: MapView) {
-        const hereCopyrightInfo: CopyrightInfo = {
-            id: "here.com",
-            year: new Date().getFullYear(),
-            label: "HERE",
-            link: "https://legal.here.com/terms"
-        };
-        const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
-
         // snippet:harp_gl_hello_world_example_4.ts
         const omvDataSource = new OmvDataSource({
-            baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
-            apiFormat: APIFormat.XYZOMV,
+            url: "https://xyz.api.here.com/tiles/herebase.02/{z}/{x}/{y}/omv",
             styleSetName: "tilezen",
             maxZoomLevel: 17,
-            authenticationCode: accessToken,
-            copyrightInfo: copyrights
+            urlParams: {
+                access_token: accessToken
+            },
+            copyrightInfo
         });
         // end:harp_gl_hello_world_example_4.ts
 

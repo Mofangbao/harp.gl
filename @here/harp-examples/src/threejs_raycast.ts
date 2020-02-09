@@ -6,15 +6,10 @@
 
 import { GeoCoordinates } from "@here/harp-geoutils";
 import { LongPressHandler, MapControls, MapControlsUI } from "@here/harp-map-controls";
-import {
-    CopyrightElementHandler,
-    CopyrightInfo,
-    MapView,
-    MapViewEventNames
-} from "@here/harp-mapview";
+import { CopyrightElementHandler, MapView, MapViewEventNames } from "@here/harp-mapview";
 import { APIFormat, OmvDataSource } from "@here/harp-omv-datasource";
 import * as THREE from "three";
-import { accessToken } from "../config";
+import { accessToken, copyrightInfo } from "../config";
 
 /**
  * This example shows how we can pick the scene and add a [three.js](https://threejs.org/) object.
@@ -35,7 +30,7 @@ import { accessToken } from "../config";
  * [[ThreejsAddSimpleObject]] example.
  */
 export namespace ThreejsRaycast {
-    const scale = 10;
+    const scale = 100;
     const geometry = new THREE.BoxGeometry(1 * scale, 1 * scale, 1 * scale);
     const material = new THREE.MeshStandardMaterial({
         color: 0x00ff00fe
@@ -60,7 +55,7 @@ export namespace ThreejsRaycast {
 
         // Instantiate the default map controls, allowing the user to pan around freely.
         const mapControls = new MapControls(map);
-        mapControls.maxPitchAngle = 50;
+        mapControls.maxTiltAngle = 50;
 
         // Center the camera on Manhattan, New York City.
         const NY = new GeoCoordinates(40.707, -74.01);
@@ -119,24 +114,30 @@ export namespace ThreejsRaycast {
         return map;
     }
 
-    const message = document.createElement("div");
-    message.innerHTML = `Long click to add a 10m^3 pink box under the mouse cursor location.`;
-
-    message.style.position = "absolute";
-    message.style.cssFloat = "right";
-    message.style.top = "10px";
-    message.style.right = "10px";
-    document.body.appendChild(message);
+    document.body.innerHTML +=
+        `<style>
+            #mapCanvas{
+                top:0;
+            }
+            #info{
+                color: #000;
+                width: 80%;
+                left: 50%;
+                position: relative;
+                margin: 10px 0 0 -40%;
+                font-size: 15px;
+            }
+            @media screen and (max-width: 700px) {
+                #info{
+                    font-size:11px;
+                }
+            }
+        </style>
+        <p id=info>Long click to add a pink box under the mouse cursor, with respect of ` +
+        `buildings' height.</p>
+    `;
 
     const mapView = initializeMapView("mapCanvas");
-
-    const hereCopyrightInfo: CopyrightInfo = {
-        id: "here.com",
-        year: new Date().getFullYear(),
-        label: "HERE",
-        link: "https://legal.here.com/terms"
-    };
-    const copyrights: CopyrightInfo[] = [hereCopyrightInfo];
 
     const omvDataSource = new OmvDataSource({
         baseUrl: "https://xyz.api.here.com/tiles/herebase.02",
@@ -144,7 +145,7 @@ export namespace ThreejsRaycast {
         styleSetName: "tilezen",
         maxZoomLevel: 17,
         authenticationCode: accessToken,
-        copyrightInfo: copyrights
+        copyrightInfo
     });
 
     mapView.addDataSource(omvDataSource);

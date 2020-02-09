@@ -5,15 +5,15 @@
  */
 
 import { Env, MapEnv, Value, ValueMap } from "@here/harp-datasource-protocol/index-decoder";
-import { EarthConstants, GeoBox, TileKey } from "@here/harp-geoutils";
+import { TileKey } from "@here/harp-geoutils";
 import { ILogger } from "@here/harp-utils";
 import * as Long from "long";
-import { Vector3 } from "three";
-import { IGeometryProcessor, ILineGeometry, IPolygonGeometry, IRing } from "./IGeometryProcessor";
+import { Vector2 } from "three";
+import { IGeometryProcessor, ILineGeometry, IPolygonGeometry } from "./IGeometryProcessor";
 import { OmvFeatureFilter } from "./OmvDataFilter";
 import { OmvDataAdapter } from "./OmvDecoder";
 import { OmvGeometryType } from "./OmvDecoderDefs";
-import { isArrayBufferLike, lat2tile } from "./OmvUtils";
+import { isArrayBufferLike } from "./OmvUtils";
 import { com } from "./proto/vector_tile";
 
 /**
@@ -36,8 +36,7 @@ export interface BaseCommand {
  * @hidden
  */
 export interface PositionCommand extends BaseCommand {
-    position: Vector3;
-    outline?: boolean;
+    position: Vector2;
 }
 
 /**
@@ -178,20 +177,12 @@ export interface GeometryCommandsVisitor {
  * @hidden
  */
 export class GeometryCommands {
-    accept(
-        geometry: number[],
-        tileKey: TileKey,
-        geoBox: GeoBox,
-        extent: number = 4096,
-        visitor: GeometryCommandsVisitor
-    ) {
-        const geometryCount = geometry.length;
+    accept(geometry: number[] | null, visitor: GeometryCommandsVisitor) {
+        if (!geometry) {
+            return;
+        }
 
-        const { north, west } = geoBox;
-        const N = Math.log2(extent);
-        const scale = Math.pow(2, tileKey.level + N);
-        const top = lat2tile(north, tileKey.level + N);
-        const left = ((west + 180) / 360) * scale;
+        const geometryCount = geometry.length;
 
         let currX = 0;
         let currY = 0;
@@ -219,29 +210,12 @@ export class GeometryCommands {
                         yCoords.push(currY);
                     }
 
-                    const R = EarthConstants.EQUATORIAL_CIRCUMFERENCE;
-
-                    const position = new Vector3(
-                        ((left + currX) / scale) * R,
-                        ((top + currY) / scale) * R,
-                        0
-                    );
-
+                    const position = new Vector2(currX, currY);
                     commands.push({ kind, position });
                 }
             } else {
-                for (let i = 0; i < commands.length; ++i) {
-                    const prevX = xCoords[i];
-                    const prevY = yCoords[i];
-                    const nextX = xCoords[(i + 1) % xCoords.length];
-                    const nextY = yCoords[(i + 1) % yCoords.length];
-                    (commands[i] as PositionCommand).outline = !(
-                        (prevX <= 0 && nextX <= 0) ||
-                        (prevX >= extent && nextX >= extent) ||
-                        (prevY <= 0 && nextY <= 0) ||
-                        (prevY >= extent && nextY >= extent)
-                    );
-                    visitor.visitCommand(commands[i]);
+                for (const command of commands) {
+                    visitor.visitCommand(command);
                 }
                 visitor.visitCommand({ kind });
                 xCoords.length = 0;
@@ -302,7 +276,7 @@ function decodeFeatureId(
     if (feature.id !== undefined) {
         if (typeof feature.id === "number") {
             return feature.id;
-        } else if (Long.isLong(feature.id)) {
+        } else if (feature.id !== null && Long.isLong(feature.id)) {
             if (feature.id.greaterThan(Number.MAX_SAFE_INTEGER)) {
                 if (logger !== undefined) {
                     logger.error(
@@ -341,18 +315,23 @@ function createFeatureEnv(
     feature: com.mapbox.pb.Tile.IFeature,
     geometryType: string,
     storageLevel: number,
+    storageLevelOffset?: number,
     logger?: ILogger,
     parent?: Env
 ): MapEnv {
     const attributes: ValueMap = {
         $layer: layer.name,
         $level: storageLevel,
+        $zoom: Math.max(0, storageLevel - (storageLevelOffset || 0)),
         $geometryType: geometryType
     };
 
     // Some sources serve `id` directly as `IFeature` property ...
     if (feature.id !== undefined) {
-        attributes.$id = decodeFeatureId(feature, logger);
+        const featureId = decodeFeatureId(feature, logger);
+        if (featureId !== undefined) {
+            attributes.$id = featureId;
+        }
     }
 
     readAttributes(layer, feature, attributes);
@@ -384,13 +363,14 @@ function asGeometryType(feature: com.mapbox.pb.Tile.IFeature | undefined): OmvGe
  * to geometries for the given [[IGeometryProcessor]].
  */
 export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
+    id = "omv-protobuf";
+
     private readonly m_geometryCommands = new GeometryCommands();
     private readonly m_processor: IGeometryProcessor;
     private readonly m_logger?: ILogger;
     private m_dataFilter?: OmvFeatureFilter;
 
     private m_tileKey!: TileKey;
-    private m_geoBox!: GeoBox;
     private m_layer!: com.mapbox.pb.Tile.ILayer;
 
     /**
@@ -432,14 +412,12 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
      *
      * @param data The data payload to process.
      * @param tileKey The [[TileKey]] of the tile enclosing the data.
-     * @param geoBox The [[GeoBox]] of the tile enclosing the data.
      */
-    process(data: ArrayBufferLike, tileKey: TileKey, geoBox: GeoBox) {
+    process(data: ArrayBufferLike, tileKey: TileKey) {
         const payload = new Uint8Array(data);
         const proto = com.mapbox.pb.Tile.decode(payload);
 
         this.m_tileKey = tileKey;
-        this.m_geoBox = geoBox;
 
         visitOmv(proto, this);
     }
@@ -477,6 +455,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -485,29 +464,30 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
             return;
         }
 
-        const geometry: Vector3[] = [];
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Point",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        geometry.push(command.position);
-                    }
+        const geometry: Vector2[] = [];
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Point",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    geometry.push(command.position);
                 }
             }
-        );
+        });
 
         if (geometry.length === 0) {
             return;
         }
 
-        const env = createFeatureEnv(this.m_layer, feature, "point", storageLevel, this.m_logger);
+        const env = createFeatureEnv(
+            this.m_layer,
+            feature,
+            "point",
+            storageLevel,
+            this.m_processor.storageLevelOffset,
+            this.m_logger
+        );
 
-        this.m_processor.processPointFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processPointFeature(layerName, layerExtents, geometry, env, storageLevel);
     }
 
     /**
@@ -522,6 +502,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -531,32 +512,33 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
         }
 
         const geometry: ILineGeometry[] = [];
-        let positions: Vector3[];
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Line",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        positions = [command.position];
-                        geometry.push({ positions });
-                    } else if (isLineToCommand(command)) {
-                        positions.push(command.position);
-                    }
+        let positions: Vector2[];
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Line",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    positions = [command.position];
+                    geometry.push({ positions });
+                } else if (isLineToCommand(command)) {
+                    positions.push(command.position);
                 }
             }
-        );
+        });
 
         if (geometry.length === 0) {
             return;
         }
 
-        const env = createFeatureEnv(this.m_layer, feature, "line", storageLevel, this.m_logger);
+        const env = createFeatureEnv(
+            this.m_layer,
+            feature,
+            "line",
+            storageLevel,
+            this.m_processor.storageLevelOffset,
+            this.m_logger
+        );
 
-        this.m_processor.processLineFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processLineFeature(layerName, layerExtents, geometry, env, storageLevel);
     }
 
     /**
@@ -571,6 +553,7 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const storageLevel = this.m_tileKey.level;
         const layerName = this.m_layer.name;
+        const layerExtents = this.m_layer.extent || 4096;
 
         if (
             this.m_dataFilter !== undefined &&
@@ -581,29 +564,19 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
 
         const geometry: IPolygonGeometry[] = [];
         const currentPolygon: IPolygonGeometry = { rings: [] };
-        let currentRing: IRing;
-        this.m_geometryCommands.accept(
-            feature.geometry,
-            this.m_tileKey,
-            this.m_geoBox,
-            this.m_layer.extent,
-            {
-                type: "Polygon",
-                visitCommand: command => {
-                    if (isMoveToCommand(command)) {
-                        currentRing = {
-                            positions: [command.position],
-                            outlines: [command.outline!]
-                        };
-                    } else if (isLineToCommand(command)) {
-                        currentRing.positions.push(command.position);
-                        currentRing.outlines!.push(command.outline!);
-                    } else if (isClosePathCommand(command)) {
-                        currentPolygon.rings.push(currentRing);
-                    }
+        let currentRing: Vector2[];
+        this.m_geometryCommands.accept(feature.geometry, {
+            type: "Polygon",
+            visitCommand: command => {
+                if (isMoveToCommand(command)) {
+                    currentRing = [command.position];
+                } else if (isLineToCommand(command)) {
+                    currentRing.push(command.position);
+                } else if (isClosePathCommand(command)) {
+                    currentPolygon.rings.push(currentRing);
                 }
             }
-        );
+        });
 
         if (currentPolygon.rings.length > 0) {
             geometry.push(currentPolygon);
@@ -613,8 +586,21 @@ export class OmvProtobufDataAdapter implements OmvDataAdapter, OmvVisitor {
             return;
         }
 
-        const env = createFeatureEnv(this.m_layer, feature, "polygon", storageLevel, this.m_logger);
+        const env = createFeatureEnv(
+            this.m_layer,
+            feature,
+            "polygon",
+            storageLevel,
+            this.m_processor.storageLevelOffset,
+            this.m_logger
+        );
 
-        this.m_processor.processPolygonFeature(layerName, geometry, env, storageLevel);
+        this.m_processor.processPolygonFeature(
+            layerName,
+            layerExtents,
+            geometry,
+            env,
+            storageLevel
+        );
     }
 }

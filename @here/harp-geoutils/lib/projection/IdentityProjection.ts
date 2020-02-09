@@ -13,15 +13,18 @@ import { isOrientedBox3Like, OrientedBox3Like } from "../math/OrientedBox3Like";
 import { Vector3Like } from "../math/Vector3Like";
 import { Projection, ProjectionType } from "./Projection";
 
-const DEG2RAD = Math.PI / 180;
+import * as THREE from "three";
 
 class IdentityProjection extends Projection {
+    /** @override */
     readonly type: ProjectionType = ProjectionType.Planar;
 
+    /** @override */
     getScaleFactor(_worldPoint: Vector3Like): number {
         return 1;
     }
 
+    /** @override */
     worldExtent<WorldBoundingBox extends Box3Like>(
         minAltitude: number,
         maxAltitude: number,
@@ -39,6 +42,7 @@ class IdentityProjection extends Projection {
         return result;
     }
 
+    /** @override */
     projectPoint<WorldCoordinates extends Vector3Like>(
         geoPoint: GeoCoordinatesLike,
         result?: WorldCoordinates
@@ -47,21 +51,24 @@ class IdentityProjection extends Projection {
             // tslint:disable-next-line:no-object-literal-type-assertion
             result = { x: 0, y: 0, z: 0 } as WorldCoordinates;
         }
-        result.x = geoPoint.longitude * DEG2RAD;
-        result.y = geoPoint.latitude * DEG2RAD;
+        result.x = THREE.Math.degToRad(geoPoint.longitude);
+        result.y = THREE.Math.degToRad(geoPoint.latitude);
         result.z = geoPoint.altitude || 0;
         return result;
     }
 
+    /** @override */
     unprojectPoint(worldPoint: Vector3Like): GeoCoordinates {
         const geoPoint = GeoCoordinates.fromRadians(worldPoint.y, worldPoint.x, worldPoint.z);
         return geoPoint;
     }
 
+    /** @override */
     unprojectAltitude(worldPoint: Vector3Like): number {
         return worldPoint.z;
     }
 
+    /** @override */
     projectBox<WorldBoundingBox extends Box3Like | OrientedBox3Like>(
         geoBox: GeoBox,
         result?: WorldBoundingBox
@@ -96,21 +103,25 @@ class IdentityProjection extends Projection {
         return result;
     }
 
+    /** @override */
     unprojectBox(worldBox: Box3Like): GeoBox {
         const minGeo = this.unprojectPoint(worldBox.min);
         const maxGeo = this.unprojectPoint(worldBox.max);
         return GeoBox.fromCoordinates(minGeo, maxGeo);
     }
 
+    /** @override */
     groundDistance(worldPoint: Vector3Like): number {
         return worldPoint.z;
     }
 
+    /** @override */
     scalePointToSurface(worldPoint: Vector3Like): Vector3Like {
         worldPoint.z = 0;
         return worldPoint;
     }
 
+    /** @override */
     surfaceNormal(_worldPoint: Vector3Like, normal?: Vector3Like) {
         if (normal === undefined) {
             normal = { x: 0, y: 0, z: 1 };

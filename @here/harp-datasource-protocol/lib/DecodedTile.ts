@@ -8,8 +8,10 @@ import {
     equirectangularProjection,
     mercatorProjection,
     normalizedEquirectangularProjection,
+    OrientedBox3,
     Projection,
     sphereProjection,
+    Vector3Like,
     webMercatorProjection
 } from "@here/harp-geoutils";
 import { Technique } from "./Techniques";
@@ -23,11 +25,20 @@ import { TileInfo } from "./TileInfo";
 export interface DecodedTile {
     techniques: Technique[];
     geometries: Geometry[];
+    pathGeometries?: PathGeometry[];
     textPathGeometries?: TextPathGeometry[];
     textGeometries?: TextGeometry[]; // ### deprecate
     poiGeometries?: PoiGeometry[];
     tileInfo?: TileInfo;
+    maxGeometryHeight?: number;
     decodeTime?: number; // time used to decode (in ms)
+
+    /**
+     * The default bounding box in [[Tile]] is based on the geo box of the tile.
+     * For data-sources that have 3d data this is not sufficient so the data-source can provide a
+     * more accurate bounding box once the data is decoded.
+     */
+    boundingBox?: OrientedBox3;
 
     /**
      * Tile data Copyright holder identifiers.
@@ -41,6 +52,20 @@ export interface DecodedTile {
 }
 
 /**
+ * This object keeps the path of the geometry. Space of the path depends on the
+ * use case, so could be either world or local tile space.
+ */
+export interface PathGeometry {
+    path: Vector3Like[];
+}
+
+/**
+ * Attributes corresponding to some decoded geometry. It may be either a map
+ * of multiple attributes or just a number with the geometry's feature id.
+ */
+export type AttributeMap = {} | number;
+
+/**
  * This object keeps textual data together with metadata to place it on the map.
  */
 export interface TextPathGeometry {
@@ -48,7 +73,7 @@ export interface TextPathGeometry {
     pathLengthSqr: number;
     text: string;
     technique: number;
-    featureId?: number;
+    objInfos?: AttributeMap;
 }
 
 /**
@@ -120,12 +145,6 @@ export interface Geometry {
     uuid?: string;
 
     /**
-     * Optional list of feature IDs. Currently only `Number` is supported, will fail if features
-     * have IDs with type `Long`.
-     */
-    featureIds?: Array<number | undefined>;
-
-    /**
      * Optional list of feature start indices. The indices point into the index attribute.
      */
     featureStarts?: number[];
@@ -133,7 +152,7 @@ export interface Geometry {
     /**
      * Optional array of objects. It can be used to pass user data from the geometry to the mesh.
      */
-    objInfos?: Array<{} | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
@@ -168,8 +187,8 @@ export interface TextGeometry {
     positions: BufferAttribute;
     texts: number[];
     technique?: number;
-    featureId?: number;
     stringCatalog?: Array<string | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
@@ -184,8 +203,8 @@ export interface PoiGeometry {
      */
     imageTextures?: number[];
     technique?: number;
-    featureId?: number;
     stringCatalog?: Array<string | undefined>;
+    objInfos?: AttributeMap[];
 }
 
 /**
@@ -250,4 +269,23 @@ export function getProjectionName(projection: Projection): string | never {
         return "equirectangular";
     }
     throw new Error("Unknown projection");
+}
+
+/**
+ * @returns Feature id from the provided attribute map.
+ */
+export function getFeatureId(attributeMap: AttributeMap | undefined): number {
+    if (attributeMap === undefined) {
+        return 0;
+    }
+
+    if (typeof attributeMap === "number") {
+        return attributeMap;
+    }
+
+    if (attributeMap.hasOwnProperty("$id")) {
+        return (attributeMap as any).$id as number;
+    }
+
+    return 0;
 }

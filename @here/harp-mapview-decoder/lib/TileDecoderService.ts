@@ -54,6 +54,7 @@ export class TileDecoderService extends WorkerService {
      *
      * @param request Message that is either a DecodeTileRequest or a TileInfoRequest.
      * @returns A promise which resolves to a [[WorkerServiceResponse]].
+     * @override
      */
     protected handleRequest(request: any): Promise<WorkerServiceResponse> {
         if (WorkerDecoderProtocol.isDecodeTileRequest(request)) {
@@ -69,6 +70,7 @@ export class TileDecoderService extends WorkerService {
      * Handle incoming configuration message. Configuration message is passed on to decoder.
      *
      * @param request Message of type [[ConfigurationMessage]].
+     * @override
      */
     protected handleMessage(message: any) {
         if (WorkerDecoderProtocol.isConfigurationMessage(message)) {
@@ -100,7 +102,7 @@ export class TileDecoderService extends WorkerService {
                 if (
                     geom.objInfos !== undefined &&
                     geom.objInfos.length === 1 &&
-                    geom.objInfos[0] !== undefined &&
+                    typeof geom.objInfos[0] === "object" &&
                     "displacementMap" in (geom.objInfos[0] as any)
                 ) {
                     transferList.push((geom.objInfos[0] as any).displacementMap.buffer);
@@ -137,6 +139,11 @@ export class TileDecoderService extends WorkerService {
     }
 
     private handleConfigurationMessage(message: WorkerDecoderProtocol.ConfigurationMessage) {
-        this.m_decoder.configure(message.styleSet, message.languages, message.options);
+        this.m_decoder.configure(
+            message.styleSet,
+            message.definitions,
+            message.languages,
+            message.options
+        );
     }
 }

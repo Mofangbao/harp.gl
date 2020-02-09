@@ -55,29 +55,33 @@
         <!--
             These paths are used here to be compatible with harp.gl CI.
         -->
-        <script src="../js/credentials.js"></script>
+        <script src="credentials.js"></script>
         <script src="three.min.js"></script>
         <script src="harp.js"></script>
 
         <script>
             const canvas = document.getElementById("mapCanvas");
 
+            // Look at New York.
+            const NY = new harp.GeoCoordinates(40.707, -74.01);
             const map = new harp.MapView({
                 canvas,
                 // This, is relative URL only to make example work in CI environment.
                 // Clients, may use CDN url like:
                 //   https://unpkg.com/@here/harp-map-theme/resources/berlin_tilezen_base.json
-                theme: "resources/berlin_tilezen_base.json"
+                theme: "resources/berlin_tilezen_base.json",
+                target: NY,
+                tilt: 50,
+                heading: -20,
+                zoomLevel: 16.1
             });
 
             harp.CopyrightElementHandler.install("copyrightNotice", map);
 
             const mapControls = new harp.MapControls(map);
-            mapControls.maxPitchAngle = 50;
-            const NY = new harp.GeoCoordinates(40.707, -74.01);
-            map.lookAt(NY, 4000, 50);
+            mapControls.maxTiltAngle = 50;
 
-            const ui = new harp.MapControlsUI(mapControls);
+            const ui = new harp.MapControlsUI(mapControls, { zoomLevel: "input" });
             canvas.parentElement.appendChild(ui.domElement);
 
             map.resize(window.innerWidth, window.innerHeight);
@@ -93,7 +97,6 @@
                 link: "https://legal.here.com/terms"
             };
             const copyrights = [hereCopyrightInfo];
-
 
             const omvDataSource = new harp.OmvDataSource({
                 baseUrl: "https://xyz.api.here.com/tiles/herebase.02",

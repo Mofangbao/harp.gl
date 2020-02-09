@@ -5,6 +5,7 @@
  */
 
 import {
+    AttributeMap,
     GeoJson,
     Geometry,
     GeometryType,
@@ -22,42 +23,13 @@ import * as THREE from "three";
 import { ExtendedTile, GeoJsonParser, GeometryData, GeometryDataBuffers } from "./GeoJsonParser";
 
 /**
- * Geometry interface that stores the geometry type and the user data.
- */
-interface GeoJsonGeometry extends Geometry {
-    type: GeometryType;
-    objInfos?: Array<{} | undefined>;
-}
-
-/**
- * Geometry interface that stores the geometry type and the user data for a POI.
- */
-export interface GeoJsonPoiGeometry extends PoiGeometry {
-    objInfos?: Array<{} | undefined>;
-}
-
-/**
- * Geometry interface that stores the geometry type and the user data for a Text.
- */
-export interface GeoJsonTextGeometry extends TextGeometry {
-    objInfos?: Array<{} | undefined>;
-}
-
-/**
- * Geometry interface that stores the geometry type and the user data for a TextPath.
- */
-export interface GeoJsonTextPathGeometry extends TextPathGeometry {
-    objInfos?: Array<{} | undefined>;
-}
-
-/**
  * Geometries bore by a [[Tile]].
  */
 export interface GeoJsonTileGeometries {
-    geometries: GeoJsonGeometry[];
-    poiGeometries: GeoJsonPoiGeometry[];
-    textGeometries: GeoJsonTextGeometry[];
-    textPathGeometries: GeoJsonTextPathGeometry[];
+    geometries: Geometry[];
+    poiGeometries: PoiGeometry[];
+    textGeometries: TextGeometry[];
+    textPathGeometries: TextPathGeometry[];
 }
 
 /**
@@ -74,14 +46,9 @@ class MeshBuffer implements IMeshBuffers {
      */
     readonly featureStarts: number[] = [];
     /**
-     * Optional list of feature IDs. Currently only Number is supported, will fail if features have
-     * IDs with type Long.
-     */
-    readonly featureIds: Array<number | undefined> = [];
-    /**
      * Optional object containing the geojson properties defined by the end-user.
      */
-    readonly geojsonProperties: Array<{} | undefined> = [];
+    readonly geojsonProperties: AttributeMap[] = [];
 }
 
 /**
@@ -142,13 +109,9 @@ export class GeoJsonGeometryCreator {
                     );
                     break;
                 case "solid-line":
-                    geometries.geometries.push(
-                        this.createSolidLineGeometry(geometryData, techniqueIndex)
-                    );
-                    break;
                 case "dashed-line":
                     geometries.geometries.push(
-                        this.createSolidLineGeometry(geometryData, techniqueIndex)
+                        this.createSolidLineGeometry(geometryData, techniqueIndex, projection)
                     );
                     break;
                 case "polygon":
@@ -161,7 +124,8 @@ export class GeoJsonGeometryCreator {
                         this.createPolygonOutlineGeometry(
                             geometryData,
                             techniqueIndex,
-                            tileWorldExtents
+                            tileWorldExtents,
+                            projection
                         )
                     );
                     break;
@@ -188,7 +152,7 @@ export class GeoJsonGeometryCreator {
     private static createPoiGeometry(
         geometryData: GeometryData,
         techniqueIndex: number
-    ): GeoJsonPoiGeometry {
+    ): PoiGeometry {
         return {
             positions: {
                 name: "position",
@@ -205,7 +169,7 @@ export class GeoJsonGeometryCreator {
     private static createTextGeometry(
         geometryData: GeometryData,
         techniqueIndex: number
-    ): GeoJsonTextGeometry {
+    ): TextGeometry {
         const labelProperty = geometryData.labelProperty! as string;
         const stringCatalog = geometryData.points.geojsonProperties.map((properties: any) => {
             return properties[labelProperty].toString();
@@ -236,12 +200,12 @@ export class GeoJsonGeometryCreator {
             const pathLengthSqr = Math2D.computeSquaredLineLength(path);
             const properties = geometryData.lines.geojsonProperties[i];
             const text = (properties as any)[geometryData.labelProperty!].toString();
-            const geometry: GeoJsonTextPathGeometry = {
+            const geometry: TextPathGeometry = {
                 technique: techniqueIndex,
                 path,
                 pathLengthSqr,
                 text,
-                objInfos: geometryData.lines.geojsonProperties
+                objInfos: properties
             };
             geometries.textPathGeometries.push(geometry);
         }
@@ -250,7 +214,7 @@ export class GeoJsonGeometryCreator {
     private static createPointGeometry(
         geometryData: GeometryData,
         techniqueIndex: number
-    ): GeoJsonGeometry {
+    ): Geometry {
         return {
             type: GeometryType.Point,
             vertexAttributes: [
@@ -274,14 +238,15 @@ export class GeoJsonGeometryCreator {
 
     private static createSolidLineGeometry(
         geometryData: GeometryData,
-        techniqueIndex: number
-    ): GeoJsonGeometry {
+        techniqueIndex: number,
+        projection: Projection
+    ): Geometry {
         const lineCenter = new THREE.Vector3();
         const lines = new LineGroup();
         const positions = new Array<number>();
 
         for (const line of geometryData.lines.vertices) {
-            lines.add(lineCenter, line);
+            lines.add(lineCenter, line, projection);
             positions.push(...line);
         }
 
@@ -322,16 +287,9 @@ export class GeoJsonGeometryCreator {
     private static createPolygonGeometry(
         geometryData: GeometryData,
         techniqueIndex: number
-    ): GeoJsonGeometry {
+    ): Geometry {
         const meshBuffer = new MeshBuffer();
-        const {
-            positions,
-            indices,
-            groups,
-            featureStarts,
-            featureIds,
-            geojsonProperties
-        } = meshBuffer;
+        const { positions, indices, groups, featureStarts, geojsonProperties } = meshBuffer;
 
         const holesVertices: number[][] = [];
 
@@ -353,9 +311,6 @@ export class GeoJsonGeometryCreator {
             }
 
             featureStarts.push(indices.length / 3);
-            // featureIds should be the id of the feature, but for geoJSON datasource we do not have
-            // it in integers, and we do not use them. Therefore, zeroes are added.
-            featureIds.push(0);
             geojsonProperties.push(polygon.geojsonProperties);
 
             for (let i = 0; i < polygon.vertices.length; i += 3) {
@@ -384,7 +339,7 @@ export class GeoJsonGeometryCreator {
             });
         }
 
-        const geometry: GeoJsonGeometry = {
+        const geometry: Geometry = {
             type: GeometryType.Polygon,
             vertexAttributes: [
                 {
@@ -405,7 +360,6 @@ export class GeoJsonGeometryCreator {
                 type: "uint32"
             };
             geometry.featureStarts = meshBuffer.featureStarts;
-            geometry.featureIds = meshBuffer.featureIds;
             geometry.objInfos = meshBuffer.geojsonProperties;
         }
 
@@ -415,10 +369,11 @@ export class GeoJsonGeometryCreator {
     private static createPolygonOutlineGeometry(
         geometryData: GeometryData,
         techniqueIndex: number,
-        tileWorldExtents: number
-    ): GeoJsonGeometry {
+        tileWorldExtents: number,
+        projection: Projection
+    ): Geometry {
         const meshBuffer = new MeshBuffer();
-        const { indices, featureStarts, featureIds, geojsonProperties } = meshBuffer;
+        const { indices, featureStarts, geojsonProperties } = meshBuffer;
 
         let contour: number[];
         const holesVertices: number[][] = [];
@@ -432,7 +387,7 @@ export class GeoJsonGeometryCreator {
                 : polygon.vertices;
 
             // External ring.
-            this.addOutlineVertices(contour, tileWorldExtents, solidOutline, position);
+            this.addOutlineVertices(contour, tileWorldExtents, solidOutline, position, projection);
 
             // Holes, if any.
             if (polygon.holes.length) {
@@ -450,19 +405,17 @@ export class GeoJsonGeometryCreator {
                         holesVertices[i],
                         tileWorldExtents,
                         solidOutline,
-                        position
+                        position,
+                        projection
                     );
                 }
             }
 
             featureStarts.push(indices.length / 3);
-            // featureIds should be the id of the feature, but for geoJSON datasource we do not have
-            // it in integers, and we do not use them. Therefore, zeroes are added.
-            featureIds.push(0);
             geojsonProperties.push(polygon.geojsonProperties);
         }
 
-        const geometry: GeoJsonGeometry = {
+        const geometry: Geometry = {
             type: GeometryType.SolidLine,
             index: {
                 buffer: new Uint32Array(solidOutline.indices).buffer,
@@ -503,7 +456,6 @@ export class GeoJsonGeometryCreator {
                 type: "uint32"
             };
             geometry.featureStarts = meshBuffer.featureStarts;
-            geometry.featureIds = meshBuffer.featureIds;
             geometry.objInfos = meshBuffer.geojsonProperties;
         }
 
@@ -513,7 +465,7 @@ export class GeoJsonGeometryCreator {
     private static createSegmentsGeometry(
         geometryData: GeometryData,
         techniqueIndex: number
-    ): GeoJsonGeometry {
+    ): Geometry {
         return {
             type: GeometryType.Line,
             vertexAttributes: [
@@ -538,7 +490,8 @@ export class GeoJsonGeometryCreator {
         contour: number[],
         tileExtents: number,
         lines: LineGroup,
-        buffer: number[]
+        buffer: number[],
+        projection: Projection
     ): void {
         const lineCenter = new THREE.Vector3();
         let outline = [];
@@ -550,12 +503,12 @@ export class GeoJsonGeometryCreator {
                 (this.isOnTileBorder(contour[i + 1], tileExtents) &&
                     this.isOnTileBorder(contour[i + 4], tileExtents))
             ) {
-                lines.add(lineCenter, [...outline]);
+                lines.add(lineCenter, [...outline], projection);
                 buffer.push(...outline);
                 outline = [];
             }
         }
-        lines.add(lineCenter, [...outline]);
+        lines.add(lineCenter, [...outline], projection);
         buffer.push(...outline);
     }
 

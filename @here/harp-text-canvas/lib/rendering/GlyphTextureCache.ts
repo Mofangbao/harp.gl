@@ -134,7 +134,7 @@ export class GlyphTextureCache {
 
         this.m_copyMaterial = new GlyphCopyMaterial();
         this.m_copyVertexBuffer = new THREE.InterleavedBuffer(new Float32Array(capacity * 20), 5);
-        this.m_copyVertexBuffer.setDynamic(true);
+        this.m_copyVertexBuffer.setUsage(THREE.DynamicDrawUsage);
 
         this.m_copyPositionAttribute = new THREE.InterleavedBufferAttribute(
             this.m_copyVertexBuffer,
@@ -147,11 +147,11 @@ export class GlyphTextureCache {
             3
         );
         this.m_copyGeometry = new THREE.BufferGeometry();
-        this.m_copyGeometry.addAttribute("position", this.m_copyPositionAttribute);
-        this.m_copyGeometry.addAttribute("uv", this.m_copyUVAttribute);
+        this.m_copyGeometry.setAttribute("position", this.m_copyPositionAttribute);
+        this.m_copyGeometry.setAttribute("uv", this.m_copyUVAttribute);
 
         const copyIndexBuffer = new THREE.BufferAttribute(new Uint32Array(capacity * 6), 1);
-        copyIndexBuffer.setDynamic(true);
+        copyIndexBuffer.setUsage(THREE.DynamicDrawUsage);
         this.m_copyGeometry.setIndex(copyIndexBuffer);
         this.m_copyMesh = new THREE.Mesh(this.m_copyGeometry, this.m_copyMaterial);
         this.m_copyMesh.frustumCulled = false;
@@ -162,11 +162,11 @@ export class GlyphTextureCache {
             new Float32Array(capacity * 8),
             2
         );
-        this.m_clearPositionAttribute.setDynamic(true);
+        this.m_clearPositionAttribute.setUsage(THREE.DynamicDrawUsage);
         this.m_clearGeometry = new THREE.BufferGeometry();
-        this.m_clearGeometry.addAttribute("position", this.m_clearPositionAttribute);
+        this.m_clearGeometry.setAttribute("position", this.m_clearPositionAttribute);
         const clearIndexBuffer = new THREE.BufferAttribute(new Uint32Array(capacity * 6), 1);
-        clearIndexBuffer.setDynamic(true);
+        clearIndexBuffer.setUsage(THREE.DynamicDrawUsage);
 
         this.m_clearGeometry.setIndex(clearIndexBuffer);
         this.m_clearMesh = new THREE.Mesh(this.m_clearGeometry, this.m_clearMaterial);
@@ -276,6 +276,9 @@ export class GlyphTextureCache {
         }
 
         if (willClearGeometry) {
+            if (this.m_clearGeometry.index === null) {
+                throw new Error("GlyphTextureCache clear geometry index is uninitialized!");
+            }
             this.m_clearPositionAttribute.needsUpdate = true;
             this.m_clearPositionAttribute.updateRange.offset = 0;
             this.m_clearPositionAttribute.updateRange.count = this.m_clearGeometryDrawCount * 8;
@@ -293,6 +296,9 @@ export class GlyphTextureCache {
         }
 
         if (willCopyGeometry) {
+            if (this.m_copyGeometry.index === null) {
+                throw new Error("GlyphTextureCache copy geometry index is uninitialized!");
+            }
             this.m_copyVertexBuffer.needsUpdate = true;
             this.m_copyVertexBuffer.updateRange.offset = 0;
             this.m_copyVertexBuffer.updateRange.count = this.m_copyGeometryDrawCount * 20;
@@ -414,6 +420,9 @@ export class GlyphTextureCache {
             );
         }
 
+        if (this.m_copyGeometry.index === null) {
+            throw new Error("GlyphTextureCache copy geometry index is uninitialized!");
+        }
         this.m_copyGeometry.index.setX(baseIndex, baseVertex);
         this.m_copyGeometry.index.setX(baseIndex + 1, baseVertex + 1);
         this.m_copyGeometry.index.setX(baseIndex + 2, baseVertex + 2);
@@ -472,6 +481,9 @@ export class GlyphTextureCache {
             );
         }
 
+        if (this.m_clearGeometry.index === null) {
+            throw new Error("GlyphTextureCache clear geometry index is uninitialized!");
+        }
         this.m_clearGeometry.index.setX(baseIndex, baseVertex);
         this.m_clearGeometry.index.setX(baseIndex + 1, baseVertex + 1);
         this.m_clearGeometry.index.setX(baseIndex + 2, baseVertex + 2);

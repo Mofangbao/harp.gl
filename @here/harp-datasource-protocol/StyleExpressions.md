@@ -1,0 +1,424 @@
+# Style Expressions
+
+Style expressions are used in __harp__ themes to filter and configure
+`techniques`.
+
+## all
+
+Returns `true` if all the sub expressions evaluate to `true`.
+
+```javascript
+["all", expr...]
+```
+
+## any
+
+Returns `true` if any sub expression evaluates to `true`.
+
+```javascript
+["any", expr...]
+```
+
+## none
+
+Returns `true` if no sub expression evaluates to `true`.
+
+```javascript
+["none", expr...]
+```
+
+## geometry-type
+
+Returns a `string` representing the geometry type of the current feature.
+The supported primitive types are: `Point`, `LineString`, and `Polygon`.
+
+```javascript
+["geometry-type"]
+```
+
+## ref
+
+References a value definition.
+
+```javascript
+["ref", name]
+```
+
+## get
+
+Gets the property value of the current `feature` or an `object`. Returns `null`
+if the property is missing.
+
+```javascript
+["get", name]
+["get", name, object]
+```
+
+## has
+
+Returns a `boolean` indicating if the current `feature` or the given
+`object` has the specified property.
+
+```javascript
+["has", name]
+["!has", name]
+
+["has", name, object]
+["!has", name, object]
+```
+
+## in
+
+Returns a `boolean` indicating if the `value` is contained in the list of `elements`.
+
+```javascript
+["in", value, [element...]]
+["!in", value, [element...]]
+```
+
+## match
+
+Compares `value` with the labels and returns the `result` of the first match.
+If the `value` doesn't match any label `fallback` will be returned. A `label`
+must be a `number`, a `string`, or an `array` of those.
+
+```javascript
+["match",
+  value,
+  label1, result1,
+  ...
+  labelN, resultN,
+  fallback
+]
+```
+
+## case
+
+Evaluates the conditions in order and return the result matching the condition.
+The `fallback` will be returned if no conditions evaluates to true.
+
+```javascript
+["case",
+  condition1, result1,
+  ...
+  conditionN, resultN,
+  fallback
+]
+```
+
+## to-boolean
+
+Converts the value to `boolean`.
+
+```javascript
+["to-boolean", value]
+```
+
+## to-string
+
+Converts the value to `string`.
+
+```javascript
+["to-string", value]
+```
+
+## to-number
+
+Converts the value to `number`, if the value cannot be converted to a number
+returns the value of the first `fallback` that is a number.
+
+```javascript
+["to-number", value, fallback...]
+```
+
+## literal
+
+Returns the given object or array.
+
+```javascript
+["literal", JSON]
+["literal", [element...]]
+```
+
+## rgb
+
+Creates a `color` from the RGB components. The components must be integers between 0 and 255.
+
+```javascript
+["rgb", number, number, number]
+```
+
+## rgba
+
+Creates a `color` from the RGBA components. The color channels (R, G, B) must be defined as
+integers between 0 and 255, while last component - alpha - holds floating point value between
+0.0 and 1.0 inclusively.
+
+```javascript
+["rgba", number, number, number, number]
+```
+
+> NOTE:
+>
+> Currently alpha channel value is silently ignored, thus full support for defining opacity with
+**rgba** expression needs to be implemented.
+
+## hsl
+
+Creates a `color` from the HSL components:
+
+  — hue value in degrees
+  — saturation value between 0 and 100
+  — lightness value between 0 and 100
+
+```javascript
+["hsl", number, number, number]
+```
+
+## alpha
+
+Extracts the alpha component from the given color.
+
+```javascript
+["alpha", color]
+```
+
+## !
+
+Returns `false` if its value can be converted to `true`; otherwise, returns `true`.
+
+```javascript
+["!", value]
+```
+
+## ==
+
+Returns `true` if the values are equal.
+
+```javascript
+["==", value, value]
+```
+
+## !=
+
+Returns `true` if the values are not equal.
+
+```javascript
+["!=", value, value]
+```
+
+## <
+
+Returns `true` if the first value is less than the second value.
+
+```javascript
+["<", value, value]
+```
+
+## >
+
+Returns `true` if the first value is greater than the second value.
+
+```javascript
+[">", value, value]
+```
+
+## <=
+
+Returns `true` if the first value is less than or equal to the second value.
+
+```javascript
+["<=", value, value]
+```
+
+## >=
+
+Returns `true` if the first value is greater than or equal to the second value.
+
+```javascript
+[">=", value, value]
+```
+
+## boolean
+
+Returns `value` if it is `boolean`; otherwise, returns the first
+fallback that is a `boolean`.
+
+```javascript
+["boolean", value, fallback...]
+```
+
+## number
+
+Returns `value` if it is `number`; otherwise, returns the first
+fallback that is a `number`.
+
+```javascript
+["number", value, fallback...]
+```
+
+## string
+
+Returns `value` if it is `string`; otherwise, returns the first
+fallback that is a `string`.
+
+```javascript
+["string", value, fallback...]
+```
+
+## coalesce
+
+Returns the first `value` that does not evaluates to `null`.
+
+```javascript
+["coalesce", value...]
+```
+
+## ppi
+
+Gets the `ppi` of the current device. If the `ppi` is not available
+the default value `72` is returned.
+
+```javascript
+["ppi"]
+```
+
+## interpolate
+
+Creates interpolation.
+
+```javascript
+["interpolate", ["linear"], ["zoom"],
+   stop1, value1,
+   ...
+   stopN, valueN,
+]
+
+["interpolate", ["exponential", base], ["zoom"],
+   stop1, value1,
+   ...
+   stopN, valueN,
+]
+
+["interpolate", ["discrete"], ["zoom"],
+   stop1, value1,
+   ...
+   stop, valueN,
+]
+```
+
+## step
+
+Evaluates the given piecewise function. Returns `defaultValue` if
+`input` is less than the first stop. Otherwise returns the value
+associated with the `stop` that is greater than or equal to `input`.
+
+```javascript
+["step", input, defaultValue
+   stop1, value1,
+   ...
+   stopN, valueN,
+]
+```
+
+## length
+
+Returns the length of an `array` or a `string` value.
+
+```javascript
+["length", string]
+["length", value]
+```
+
+## at
+
+Returns the element of the array at the given position.
+
+```javascript
+["at", number, array]
+```
+
+## concat
+
+Concatenates the given string values.
+
+```javascript
+["concat", value, value...]
+```
+
+## downcase
+
+Converts the value to a lowercase string.
+
+```javascript
+["downcase", value]
+```
+
+## upcase
+
+Converts the value to a upcase string.
+
+```javascript
+["upcase", value]
+```
+
+## ~=
+
+Returns `true` if the value contains the given `string`.
+
+```javascript
+["~=", value, string]
+```
+
+## ^=
+
+Returns `true` if the value starts with the given `string`.
+
+```javascript
+["^=", value, string]
+```
+
+## $=
+
+Returns `true` if the value ends with the given `string`.
+
+```javascript
+["$=", value, string]
+```
+
+## typeof
+
+Returns a string representing the type of `value`.
+
+```javascript
+["typeof", value]
+```
+
+## Math operators
+
+```javascript
+["max", number, number]
+["min", number, number]
+["clamp", number, number, number]
+["^", value, value]
+["-", value, value]
+["/", value, value]
+["%", value, value]
+["+", value, value...]
+["*", value, value...]
+["abs", value]
+["acos", value]
+["asin", value]
+["ceil", value]
+["cos", value]
+["e"]
+["floor", value]
+["ln", value]
+["ln2", value]
+["log10", value]
+["pi"]
+["round", value]
+["sin", value]
+["sqrt", value]
+["tan", value]
+```

@@ -9,38 +9,91 @@ import * as THREE from "three";
 import { debugContext } from "./DebugContext";
 
 declare const require: any;
+
 // tslint:disable-next-line:no-var-requires
-const RTree = require("rtree");
+const RBush = require("rbush");
 
 const logger = LoggerManager.instance.create("ScreenCollissions");
 
-/**
- * @hidden
- */
-export class ScreenCollisions {
-    /**
-     * Converts a [[THREE.Box2]] to an internal [[Math2D.Box]].
-     *
-     * @param threeBox The [[THREE.Box2]] to convert.
-     * @param box2 The conversion target.
-     */
-    static toBox2D(threeBox: THREE.Box2, box2: Math2D.Box) {
-        box2.x = threeBox.min.x;
-        box2.y = threeBox.min.y;
-        box2.w = threeBox.max.x - threeBox.min.x;
-        box2.h = threeBox.max.y - threeBox.min.y;
+export interface IBox {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+}
+
+export class CollisionBox extends Math2D.Box implements IBox {
+    constructor(box?: Math2D.Box | THREE.Box2 | IBox) {
+        super();
+        if (box !== undefined) {
+            this.copy(box);
+        }
     }
 
+    copy(box: Math2D.Box | THREE.Box2 | IBox): CollisionBox {
+        if (box instanceof Math2D.Box) {
+            this.set(box.x, box.y, box.w, box.h);
+        } else if (box instanceof THREE.Box2) {
+            this.set(box.min.x, box.min.y, box.max.x - box.min.x, box.max.y - box.min.y);
+        } else {
+            this.set(box.minX, box.minY, box.maxX - box.minX, box.maxY - box.minY);
+        }
+        return this;
+    }
+    get minX(): number {
+        return this.x;
+    }
+    set minX(minX: number) {
+        this.x = minX;
+    }
+    get maxX(): number {
+        return this.x + this.w;
+    }
+    set maxX(maxX: number) {
+        this.w = maxX - this.x;
+    }
+    get minY(): number {
+        return this.y;
+    }
+    set minY(minY: number) {
+        this.y = minY;
+    }
+    get maxY(): number {
+        return this.y + this.h;
+    }
+    set maxY(maxY: number) {
+        this.h = maxY - this.y;
+    }
+}
+
+/**
+ * Collision box with additional boxes defining tighter bounds for the enclosed feature
+ * (e.g.glyph bounds for text).
+ */
+export class DetailedCollisionBox extends CollisionBox {
+    constructor(box: Math2D.Box | THREE.Box2 | IBox, readonly detailBoxes: CollisionBox[]) {
+        super(box);
+    }
+}
+
+export interface LineWithBound extends IBox {
+    line: THREE.Line3;
+}
+
+export function isLineWithBound(box: IBox): box is LineWithBound {
+    return (box as LineWithBound).line !== undefined;
+}
+
+const tmpCollisionBox = new CollisionBox();
+
+export class ScreenCollisions {
     /** The screen bounding box. */
     readonly screenBounds = new Math2D.Box();
 
     /** Tree of allocated bounds. */
-    protected rtree = new RTree();
 
-    /**
-     * An array of temporary variables used when converting boxes to reduce allocations.
-     */
-    private m_returnArray: Math2D.Box[] = [];
+    private rtree = new RBush();
+
     /**
      * Constructs a new ScreenCollisions object.
      */
@@ -52,7 +105,7 @@ export class ScreenCollisions {
      * Resets the list of allocated screen bounds.
      */
     reset() {
-        this.rtree = new RTree();
+        this.rtree.clear();
     }
 
     /**
@@ -69,10 +122,31 @@ export class ScreenCollisions {
     /**
      * Marks the region of the screen intersecting with the given bounding box as allocated.
      *
-     * @param bounds The bounding box in world coordinates.
+     * @param bounds The bounding box in NDC scaled coordinates (i.e. top left is -width/2,
+     * -height/2)
      */
-    allocate(bounds: Math2D.Box): void {
-        this.rtree.insert(bounds, null);
+    allocate(bounds: Math2D.Box | CollisionBox | DetailedCollisionBox): void {
+        const bbox = !(bounds instanceof CollisionBox) ? new CollisionBox(bounds) : bounds;
+        this.rtree.insert(bbox);
+    }
+
+    /**
+     * Inserts the given bounds into the rtree.
+     *
+     * @param bounds The bounding boxes (the bounding boxes must be in the space returned from the
+     * ScreenProjector.project method).
+     */
+    allocateIBoxes(bounds: IBox[]) {
+        this.rtree.load(bounds);
+    }
+
+    /**
+     * Search for all bounds in the tree intersecting with the given box.
+     * @param box The box used for the search.
+     * @returns An array of all IBoxes intersecting with the given box.
+     */
+    search(box: CollisionBox): IBox[] {
+        return this.rtree.search(box);
     }
 
     /**
@@ -80,11 +154,10 @@ export class ScreenCollisions {
      *
      * @param bounds The bounding box in world coordinates.
      */
-    isAllocated(bounds: Math2D.Box): boolean {
-        // Re-use array to reduce allocations.
-        this.m_returnArray.length = 0;
-        this.m_returnArray = this.rtree.search(bounds, undefined, this.m_returnArray);
-        return this.m_returnArray.length !== 0;
+    isAllocated(bounds: Math2D.Box | CollisionBox): boolean {
+        const collisionBox = bounds instanceof CollisionBox ? bounds : tmpCollisionBox.copy(bounds);
+        const results = this.search(collisionBox);
+        return this.intersectsDetails(collisionBox, results);
     }
 
     /**
@@ -94,6 +167,81 @@ export class ScreenCollisions {
      */
     isVisible(bounds: Math2D.Box): boolean {
         return this.screenBounds.intersects(bounds);
+    }
+
+    /**
+     * Checks if the given screen bounds is contained within the frustum of the active camera.
+     *
+     * @param bounds The bounding box in world coordinates.
+     */
+    isFullyVisible(bounds: Math2D.Box): boolean {
+        return this.screenBounds.containsBox(bounds);
+    }
+
+    /**
+     * Test whether a given [[CollisionBox]] intersects with any of the details in the specified
+     * [[IBox]]es.
+     *
+     * @param testBox The box to test for intersection.
+     * @param boxes The candidate boxes the test box may intersect with. It's assumed that the
+     * global bounds of these boxes intersect with the given test box.
+     * @returns `true` if any intersection found.
+     */
+    intersectsDetails(testBox: CollisionBox, boxes: IBox[]): boolean {
+        for (const box of boxes) {
+            if (box instanceof DetailedCollisionBox) {
+                for (const detailBox of box.detailBoxes) {
+                    if (detailBox.intersects(testBox)) {
+                        return true;
+                    }
+                }
+            } else if (isLineWithBound(box)) {
+                const boundedLine = box as LineWithBound;
+                if (this.intersectsLine(testBox, boundedLine)) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Computes the intersection between the supplied CollisionBox and the LineWithBound.
+     * @note The [[CollisionBox]] is in Screen Bounds space, whereas the line must be
+     * in Screen Coordinate space
+     * @deprecated Because this is meant just for testing.
+     */
+    intersectsLine(bbox: CollisionBox, boundedLine: LineWithBound): boolean {
+        const line = boundedLine.line;
+
+        // Note, these aren't normalized, but it doesn't matter, we are just interested
+        // in the sign.
+        const lineXDiffTransformed = line.end.x - line.start.x;
+
+        // Sign of bottom left, bottom right, top left and top right corners.
+        let signBL: number;
+        let signBR: number;
+        let signTL: number;
+        let signTR: number;
+        if (lineXDiffTransformed !== 0) {
+            const lineYDiffTransformed = line.end.y - line.start.y;
+            const normalX = lineYDiffTransformed;
+            const normalY = -lineXDiffTransformed;
+            const D = line.start.y - (lineYDiffTransformed / lineXDiffTransformed) * line.start.x;
+
+            signBL = Math.sign(bbox.minX * normalX + (bbox.minY - D) * normalY);
+            signBR = Math.sign(bbox.maxX * normalX + (bbox.minY - D) * normalY);
+            signTL = Math.sign(bbox.minX * normalX + (bbox.maxY - D) * normalY);
+            signTR = Math.sign(bbox.maxX * normalX + (bbox.maxY - D) * normalY);
+        } else {
+            signBL = Math.sign(bbox.minX - line.start.x);
+            signBR = Math.sign(bbox.maxX - line.start.x);
+            signTL = Math.sign(bbox.minX - line.start.x);
+            signTR = Math.sign(bbox.maxX - line.start.x);
+        }
+        return signBL !== signBR || signBL !== signTL || signBL !== signTR;
     }
 }
 
@@ -129,6 +277,7 @@ export class ScreenCollisionsDebug extends ScreenCollisions {
 
     /**
      * Resets the list of allocated bounds and clears the debug canvas.
+     * @override
      */
     reset() {
         super.reset();
@@ -145,6 +294,7 @@ export class ScreenCollisionsDebug extends ScreenCollisions {
      *
      * @param width The width of the container.
      * @param height The height of the container.
+     * @override
      */
     update(width: number, height: number) {
         if (this.m_renderingEnabled) {
@@ -170,8 +320,9 @@ export class ScreenCollisionsDebug extends ScreenCollisions {
      * Marks the region of the screen intersecting with the given bounding box as allocated.
      *
      * @param bounds the bounding box in world coordinates.
+     * @override
      */
-    allocate(bounds: Math2D.Box): void {
+    allocate(bounds: Math2D.Box | CollisionBox): void {
         super.allocate(bounds);
 
         this.m_numAllocations++;
@@ -187,38 +338,52 @@ export class ScreenCollisionsDebug extends ScreenCollisions {
         }
     }
 
-    /**
-     * Checks if the given bounding box is already allocated.
-     *
-     * @param bounds The bounding box in world coordinates.
-     */
-    isAllocated(bounds: Math2D.Box): boolean {
-        const isFailed = super.isAllocated(bounds);
+    /** @override */
+    allocateIBoxes(boundsArray: IBox[]) {
+        for (const bounds of boundsArray) {
+            this.m_numAllocations++;
 
+            if (this.m_renderingEnabled && this.m_renderContext !== null) {
+                this.m_renderContext.strokeStyle = "#aa2222";
+                this.m_renderContext.strokeRect(
+                    bounds.minX - this.screenBounds.x,
+                    this.screenBounds.y + this.screenBounds.h - bounds.minY - 1,
+                    bounds.maxX - bounds.minX,
+                    -(bounds.maxY - bounds.minY)
+                );
+            }
+        }
+        super.allocateIBoxes(boundsArray);
+    }
+
+    /** @override */
+    intersectsDetails(testBox: CollisionBox, boxes: IBox[]): boolean {
+        const collisionFound = super.intersectsDetails(testBox, boxes);
         if (this.m_renderingEnabled && this.m_renderContext !== null) {
-            const offset = isFailed ? 2 : 0;
-            this.m_renderContext.strokeStyle = isFailed ? "#FF0000" : "#00ff00";
+            const offset = collisionFound ? 2 : 0;
+            this.m_renderContext.strokeStyle = collisionFound ? "#FF0000" : "#00ff00";
             this.m_renderContext.strokeRect(
-                bounds.x - this.screenBounds.x - offset,
-                this.screenBounds.y + this.screenBounds.h - bounds.y - 1 + offset,
-                bounds.w + 2 * offset,
-                -bounds.h - 2 * offset
+                testBox.x - this.screenBounds.x - offset,
+                this.screenBounds.y + this.screenBounds.h - testBox.y - 1 + offset,
+                testBox.w + 2 * offset,
+                -testBox.h - 2 * offset
             );
         }
 
-        if (isFailed) {
+        if (collisionFound) {
             this.m_numFailedTests++;
         } else {
             this.m_numSuccessfulTests++;
         }
 
-        return isFailed;
+        return collisionFound;
     }
 
     /**
      * Checks if the given screen bounds intersects with the frustum of the active camera.
      *
      * @param bounds The bounding box in world coordinates.
+     * @override
      */
     isVisible(bounds: Math2D.Box): boolean {
         const visible = super.isVisible(bounds);

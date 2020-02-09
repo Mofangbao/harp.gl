@@ -13,48 +13,66 @@ import { InterpolatedProperty, InterpolationMode } from "../lib/InterpolatedProp
 import { StringEncodedNumeralType } from "../lib/StringEncodedNumeral";
 
 const levels = new Float32Array([0, 5, 10]);
-const numberProperty: InterpolatedProperty<number> = {
+
+const numberProperty: InterpolatedProperty = {
     interpolationMode: InterpolationMode.Discrete,
     zoomLevels: levels,
-    values: new Float32Array([0, 100, 500])
+    values: [0, 100, 500]
 };
-const booleanProperty: InterpolatedProperty<boolean> = {
+
+const booleanProperty: InterpolatedProperty = {
     interpolationMode: InterpolationMode.Discrete,
     zoomLevels: levels,
-    values: new Float32Array([1.0, 0.0, 1.0])
+    values: [true, false, true]
 };
-const colorProperty: InterpolatedProperty<string> = {
+
+const colorProperty: InterpolatedProperty = {
     interpolationMode: InterpolationMode.Discrete,
     zoomLevels: levels,
-    values: new Float32Array([0, 1, 0.5, 120 / 360, 1, 0.5, 240 / 360, 1, 0.5]),
+    // [r0, g0, b0, r1, g1, b1, ...]
+    values: [1, 0, 0, 0, 1, 0, 0, 0, 1],
     _stringEncodedNumeralType: StringEncodedNumeralType.Hex
+};
+
+const enumProperty: InterpolatedProperty = {
+    interpolationMode: InterpolationMode.Discrete,
+    zoomLevels: levels,
+    values: ["Enum0", "Enum1", "Enum2"]
 };
 
 describe("Interpolation", function() {
     it("Discrete", () => {
-        assert.equal(getPropertyValue(numberProperty, -Infinity), 0);
-        assert.equal(getPropertyValue(numberProperty, 0), 0);
-        assert.equal(getPropertyValue(numberProperty, 2.5), 0);
-        assert.equal(getPropertyValue(numberProperty, 5), 100);
-        assert.equal(getPropertyValue(numberProperty, 7.5), 100);
-        assert.equal(getPropertyValue(numberProperty, 10), 500);
-        assert.equal(getPropertyValue(numberProperty, Infinity), 500);
+        assert.strictEqual(getPropertyValue(numberProperty, -Infinity), 0);
+        assert.strictEqual(getPropertyValue(numberProperty, 0), 0);
+        assert.strictEqual(getPropertyValue(numberProperty, 2.5), 0);
+        assert.strictEqual(getPropertyValue(numberProperty, 5), 100);
+        assert.strictEqual(getPropertyValue(numberProperty, 7.5), 100);
+        assert.strictEqual(getPropertyValue(numberProperty, 10), 500);
+        assert.strictEqual(getPropertyValue(numberProperty, Infinity), 500);
 
-        assert.equal(getPropertyValue(booleanProperty, -Infinity), 1);
-        assert.equal(getPropertyValue(booleanProperty, 0), 1);
-        assert.equal(getPropertyValue(booleanProperty, 2.5), 1);
-        assert.equal(getPropertyValue(booleanProperty, 5), 0);
-        assert.equal(getPropertyValue(booleanProperty, 7.5), 0);
-        assert.equal(getPropertyValue(booleanProperty, 10), 1);
-        assert.equal(getPropertyValue(booleanProperty, Infinity), 1);
+        assert.strictEqual(getPropertyValue(booleanProperty, -Infinity), true);
+        assert.strictEqual(getPropertyValue(booleanProperty, 0), true);
+        assert.strictEqual(getPropertyValue(booleanProperty, 2.5), true);
+        assert.strictEqual(getPropertyValue(booleanProperty, 5), false);
+        assert.strictEqual(getPropertyValue(booleanProperty, 7.5), false);
+        assert.strictEqual(getPropertyValue(booleanProperty, 10), true);
+        assert.strictEqual(getPropertyValue(booleanProperty, Infinity), true);
 
-        assert.equal(getPropertyValue(colorProperty, -Infinity), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 0), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 2.5), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 5), 0x00ff00);
-        assert.equal(getPropertyValue(colorProperty, 7.5), 0x00ff00);
-        assert.equal(getPropertyValue(colorProperty, 10), 0x0000ff);
-        assert.equal(getPropertyValue(colorProperty, Infinity), 0x0000ff);
+        assert.strictEqual(getPropertyValue(colorProperty, -Infinity), 0xff0000);
+        assert.strictEqual(getPropertyValue(colorProperty, 0), 0xff0000);
+        assert.strictEqual(getPropertyValue(colorProperty, 2.5), 0xff0000);
+        assert.strictEqual(getPropertyValue(colorProperty, 5), 0x00ff00);
+        assert.strictEqual(getPropertyValue(colorProperty, 7.5), 0x00ff00);
+        assert.strictEqual(getPropertyValue(colorProperty, 10), 0x0000ff);
+        assert.strictEqual(getPropertyValue(colorProperty, Infinity), 0x0000ff);
+
+        assert.strictEqual(getPropertyValue(enumProperty, -Infinity), "Enum0");
+        assert.strictEqual(getPropertyValue(enumProperty, 0), "Enum0");
+        assert.strictEqual(getPropertyValue(enumProperty, 2.5), "Enum0");
+        assert.strictEqual(getPropertyValue(enumProperty, 5), "Enum1");
+        assert.strictEqual(getPropertyValue(enumProperty, 7.5), "Enum1");
+        assert.strictEqual(getPropertyValue(enumProperty, 10), "Enum2");
+        assert.strictEqual(getPropertyValue(enumProperty, Infinity), "Enum2");
     });
     it("Linear", () => {
         numberProperty.interpolationMode = InterpolationMode.Linear;
@@ -70,9 +88,11 @@ describe("Interpolation", function() {
 
         assert.equal(getPropertyValue(colorProperty, -Infinity), 0xff0000);
         assert.equal(getPropertyValue(colorProperty, 0), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 2.5), 0xfeff00);
+        // rgb: [ 0.5, 0.5, 0 ]
+        assert.equal(getPropertyValue(colorProperty, 2.5), 0x7f7f00);
         assert.equal(getPropertyValue(colorProperty, 5), 0x00ff00);
-        assert.equal(getPropertyValue(colorProperty, 7.5), 0x00feff);
+        // rgb: [ 0, 0.5, 0.5 ]
+        assert.equal(getPropertyValue(colorProperty, 7.5), 0x007f7f);
         assert.equal(getPropertyValue(colorProperty, 10), 0x0000ff);
         assert.equal(getPropertyValue(colorProperty, Infinity), 0x0000ff);
     });
@@ -90,9 +110,11 @@ describe("Interpolation", function() {
 
         assert.equal(getPropertyValue(colorProperty, -Infinity), 0xff0000);
         assert.equal(getPropertyValue(colorProperty, 0), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 2.5), 0xfeff00);
+        // rgb: [ 0.4375, 0.625, 0 ]
+        assert.equal(getPropertyValue(colorProperty, 2.5), 0x6f9f00);
         assert.equal(getPropertyValue(colorProperty, 5), 0x00ff00);
-        assert.equal(getPropertyValue(colorProperty, 7.5), 0x00feff);
+        // rgb: [ 0, 0.625, 0.4375 ]
+        assert.equal(getPropertyValue(colorProperty, 7.5), 0x009f6f);
         assert.equal(getPropertyValue(colorProperty, 10), 0x0000ff);
         assert.equal(getPropertyValue(colorProperty, Infinity), 0x0000ff);
     });
@@ -110,9 +132,11 @@ describe("Interpolation", function() {
 
         assert.equal(getPropertyValue(colorProperty, -Infinity), 0xff0000);
         assert.equal(getPropertyValue(colorProperty, 0), 0xff0000);
-        assert.equal(getPropertyValue(colorProperty, 2.5), 0xff7f00);
+        // rgb: [ 0.75, 0.25, 0 ]
+        assert.equal(getPropertyValue(colorProperty, 2.5), 0xbf3f00);
         assert.equal(getPropertyValue(colorProperty, 5), 0x00ff00);
-        assert.equal(getPropertyValue(colorProperty, 7.5), 0x00ff7f);
+        // rgb: [ 0, 0.75, 0.25 ]
+        assert.equal(getPropertyValue(colorProperty, 7.5), 0x00bf3f);
         assert.equal(getPropertyValue(colorProperty, 10), 0x0000ff);
         assert.equal(getPropertyValue(colorProperty, Infinity), 0x0000ff);
     });

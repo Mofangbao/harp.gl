@@ -9,11 +9,12 @@ import {
     IWorkerChannelMessage,
     LoggerManager,
     LogLevel,
-    MathUtils,
     WORKERCHANNEL_MSG_TYPE
 } from "@here/harp-utils";
 
 import { WorkerLoader } from "./workers/WorkerLoader";
+
+import * as THREE from "three";
 
 const logger = LoggerManager.instance.create("ConcurrentWorkerSet");
 
@@ -46,6 +47,13 @@ export interface ConcurrentWorkerSetOptions {
      * Defaults to CLAMP(`navigator.hardwareConcurrency` - 1, 1, 4) or [[DEFAULT_WORKER_COUNT]].
      */
     workerCount?: number;
+
+    /**
+     * Timeout in milliseconds, in which each worker should set initial message.
+     *
+     * @default 10 seconds, see [[DEFAULT_WORKER_INITIALIZATION_TIMEOUT]]
+     */
+    workerConnectionTimeout?: number;
 }
 
 /**
@@ -69,7 +77,14 @@ interface WorkerRequestEntry {
 /**
  * The default number of Web Workers to use if `navigator.hardwareConcurrency` is unavailable.
  */
-const DEFAULT_WORKER_COUNT = 4;
+const DEFAULT_WORKER_COUNT = 2;
+
+/**
+ * The default timeout for first message from worker.
+ *
+ * @see [[WorkerLoader.startWorker]]
+ */
+export const DEFAULT_WORKER_INITIALIZATION_TIMEOUT = 10000;
 
 /**
  * A set of concurrent Web Workers. Acts as a Communication Peer for [[WorkerService]] instances
@@ -96,6 +111,7 @@ export class ConcurrentWorkerSet {
     // memory consumption in idle workers.
     private m_availableWorkers = new Array<Worker>();
     private m_workerPromises = new Array<Promise<WorkerEntry | undefined>>();
+    private m_workerCount: number | undefined;
 
     private readonly m_readyPromises = new Map<string, ReadyPromise>();
     private readonly m_requests: Map<number, RequestEntry> = new Map();
@@ -165,20 +181,24 @@ export class ConcurrentWorkerSet {
             throw new Error("ConcurrentWorker set already started");
         }
 
-        const workerCount = getOptionValue(
+        this.m_workerCount = getOptionValue(
             this.m_options.workerCount,
             typeof navigator !== "undefined" && navigator.hardwareConcurrency !== undefined
                 ? // We need to have at least one worker
-                  MathUtils.clamp(navigator.hardwareConcurrency - 1, 1, 4)
+                  THREE.Math.clamp(navigator.hardwareConcurrency - 1, 1, 2)
                 : undefined,
             DEFAULT_WORKER_COUNT
         );
 
         // Initialize the workers. The workers now have an ID to identify specific workers and
         // handle their busy state.
-        for (let workerId = 0; workerId < workerCount; ++workerId) {
-            const workerPromise = WorkerLoader.startWorker(this.m_options.scriptUrl)
-                .then(worker => {
+        const timeout = getOptionValue(
+            this.m_options.workerConnectionTimeout,
+            DEFAULT_WORKER_INITIALIZATION_TIMEOUT
+        );
+        for (let workerId = 0; workerId < this.m_workerCount; ++workerId) {
+            const workerPromise = WorkerLoader.startWorker(this.m_options.scriptUrl, timeout).then(
+                worker => {
                     const listener = (evt: Event): void => {
                         this.onWorkerMessage(workerId, evt as MessageEvent);
                     };
@@ -190,14 +210,19 @@ export class ConcurrentWorkerSet {
                         worker,
                         listener
                     };
-                })
-                .catch(error => {
-                    logger.error(`failed to load worker ${workerId}: ${error}`);
-                    return undefined;
-                });
+                }
+            );
             this.m_workerPromises.push(workerPromise);
         }
         this.m_stopped = false;
+    }
+
+    /**
+     * The number of workers started for this worker set. The value is `undefined` until the workers
+     * have been created.
+     */
+    get workerCount(): number | undefined {
+        return this.m_workerCount;
     }
 
     /**
@@ -247,11 +272,13 @@ export class ConcurrentWorkerSet {
      * it has started successfully. This method resolves when all workers in a set have
      * `service` initialized.
      *
+     * Promise is rejected if any of worker fails to start.
+     *
      * @param serviceId The service identifier.
      */
-    connect(serviceId: string): Promise<void> {
+    async connect(serviceId: string): Promise<void> {
         this.ensureStarted();
-
+        await Promise.all(this.m_workerPromises);
         return this.getReadyPromise(serviceId).promise as Promise<void>;
     }
 
@@ -300,11 +327,11 @@ export class ConcurrentWorkerSet {
         let resolver: ((error?: any, response?: any) => void) | undefined;
 
         const promise = new Promise<Res>((resolve, reject) => {
-            resolver = (error, response) => {
+            resolver = (error?: Error, response?: Res) => {
                 this.m_requests.delete(messageId);
 
                 if (error !== undefined) {
-                    reject(error instanceof Error ? error : new Error(error.toString()));
+                    reject(error);
                 } else {
                     resolve(response as Res);
                 }
@@ -354,11 +381,11 @@ export class ConcurrentWorkerSet {
 
             let resolver: ((error?: any, response?: any) => void) | undefined;
             const promise = new Promise<Res>((resolve, reject) => {
-                resolver = (error, response) => {
+                resolver = (error: Error, response: Res) => {
                     this.m_requests.delete(messageId);
 
                     if (error !== undefined) {
-                        reject(new Error(error.toString()));
+                        reject(error);
                     } else {
                         resolve(response as Res);
                     }
@@ -467,8 +494,12 @@ export class ConcurrentWorkerSet {
             } else {
                 logger.error(`[${this.m_options.scriptUrl}]: onWorkerMessage: invalid workerId`);
             }
-            if (response.error !== undefined) {
-                entry.resolver(new Error(response.error.toString()));
+            if (response.errorMessage !== undefined) {
+                const error = new Error(response.errorMessage);
+                if (response.errorStack !== undefined) {
+                    error.stack = response.errorStack;
+                }
+                entry.resolver(error);
             } else {
                 entry.resolver(undefined, response.response);
             }

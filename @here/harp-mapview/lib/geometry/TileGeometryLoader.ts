@@ -7,7 +7,6 @@ import {
     DecodedTile,
     GeometryKind,
     GeometryKindSet,
-    isDashedLineTechnique,
     isExtrudedLineTechnique,
     isExtrudedPolygonTechnique,
     isFillTechnique,
@@ -67,6 +66,11 @@ export interface TileGeometryLoader {
      * Dispose of any resources.
      */
     dispose(): void;
+
+    /**
+     * Reset the loader to its initial state and cancels any asynchronous work.
+     */
+    reset(): void;
 }
 
 export namespace TileGeometryLoader {
@@ -120,7 +124,6 @@ export namespace TileGeometryLoader {
                 geometryKind = GeometryKind.Area;
             } else if (
                 isLineTechnique(technique) ||
-                isDashedLineTechnique(technique) ||
                 isSolidLineTechnique(technique) ||
                 isSegmentsTechnique(technique) ||
                 isExtrudedLineTechnique(technique)
@@ -152,6 +155,7 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
     private m_decodedTile?: DecodedTile;
     private m_isFinished: boolean = false;
     private m_availableGeometryKinds: GeometryKindSet | undefined;
+    private m_timeout: any;
 
     constructor(private m_tile: Tile) {}
 
@@ -171,8 +175,23 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
         return this.m_isFinished;
     }
 
-    setDecodedTile(decodedTile: DecodedTile) {
-        this.m_decodedTile = this.m_tile.decodedTile;
+    /**
+     * Set the [[DecodedTile]] of the tile. Is called after the decoded tile has been loaded, and
+     * prepares its content for later processing in the 'updateXXX' methods.
+     *
+     * @param {DecodedTile} decodedTile The decoded tile with the flat geometry data belonging to
+     *      this tile.
+     * @returns {DecodedTile} The processed decoded tile.
+     */
+    setDecodedTile(decodedTile: DecodedTile): DecodedTile {
+        this.m_decodedTile = decodedTile;
+
+        if (this.m_decodedTile !== undefined) {
+            this.m_availableGeometryKinds = TileGeometryLoader.prepareDecodedTile(
+                this.m_decodedTile
+            );
+        }
+        return this.m_decodedTile;
     }
 
     get availableGeometryKinds(): GeometryKindSet | undefined {
@@ -183,10 +202,18 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
         enabledKinds: GeometryKindSet | undefined,
         disabledKinds: GeometryKindSet | undefined
     ): void {
-        if (this.m_decodedTile === undefined && this.m_tile.decodedTile !== undefined) {
-            this.setDecodedTile(this.m_tile.decodedTile);
+        const tile = this.tile;
+
+        // First time this tile is handled:
+        if (this.m_decodedTile === undefined && tile.decodedTile !== undefined) {
+            TileGeometryCreator.instance.processTechniques(
+                tile.decodedTile,
+                enabledKinds,
+                disabledKinds
+            );
+
+            this.setDecodedTile(tile.decodedTile);
             this.prepareForRender(enabledKinds, disabledKinds);
-            this.finish();
         }
     }
 
@@ -194,10 +221,22 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
         this.m_decodedTile = undefined;
     }
 
+    reset(): void {
+        this.m_decodedTile = undefined;
+        this.m_isFinished = false;
+        if (this.m_availableGeometryKinds !== undefined) {
+            this.m_availableGeometryKinds.clear();
+        }
+        if (this.m_timeout !== undefined) {
+            clearTimeout(this.m_timeout);
+        }
+    }
+
     private finish() {
         this.m_tile.loadingFinished();
         this.m_tile.removeDecodedTile();
         this.m_isFinished = true;
+        this.m_timeout = undefined;
     }
 
     /**
@@ -214,9 +253,10 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
         const decodedTile = this.m_decodedTile;
         this.m_decodedTile = undefined;
         if (decodedTile === undefined || tile.disposed || !tile.isVisible) {
+            this.finish();
             return;
         }
-        setTimeout(() => {
+        this.m_timeout = setTimeout(() => {
             const stats = PerformanceStatistics.instance;
             // If the tile has become invisible while being loaded, for example by moving the
             // camera, the tile is not finished and its geometry is not created. This is an
@@ -232,6 +272,7 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
                         `Decoded tile: ${tile.dataSource.name} # lvl=${tile.tileKey.level} col=${tile.tileKey.column} row=${tile.tileKey.row} DISCARDED - invisible`
                     );
                 }
+                this.finish();
                 return;
             }
             let now = 0;
@@ -241,6 +282,7 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
 
             const geometryCreator = TileGeometryCreator.instance;
 
+            tile.clear();
             geometryCreator.initDecodedTile(decodedTile, enabledKinds, disabledKinds);
 
             geometryCreator.createAllGeometries(tile, decodedTile);
@@ -264,6 +306,10 @@ export class SimpleTileGeometryLoader implements TileGeometryLoader {
                     decodedTile.textPathGeometries !== undefined
                         ? decodedTile.textPathGeometries.length
                         : 0
+                );
+                currentFrame.addValue(
+                    "geometryCount.numPathGeometries",
+                    decodedTile.pathGeometries !== undefined ? decodedTile.pathGeometries.length : 0
                 );
                 currentFrame.addMessage(
                     // tslint:disable-next-line: max-line-length

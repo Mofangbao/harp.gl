@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeoCoordinates, GeoCoordinatesLike, MathUtils } from "@here/harp-geoutils";
+import { GeoCoordinates, GeoCoordinatesLike } from "@here/harp-geoutils";
 import { EventNames, MapControls } from "./MapControls";
 
 import { MapView } from "@here/harp-mapview";
@@ -220,6 +220,7 @@ export class CameraRotationAnimation extends CameraAnimation {
      *
      * @param time Duration of the animation in milliseconds.
      * @param onFinished Callback that gets triggered once the animation ends.
+     * @override
      */
     start(time?: number, onFinished?: () => void): void {
         if (this.running) {
@@ -250,6 +251,7 @@ export class CameraRotationAnimation extends CameraAnimation {
 
     /**
      * Stop the animation. Can be started again (with original values only, though).
+     * @override
      */
     stop(): void {
         if (!this.running) {
@@ -315,7 +317,7 @@ export class CameraRotationAnimation extends CameraAnimation {
             .onUpdate(({ rotation }) => {
                 this.m_lastRotationValue = rotation;
 
-                rotZ.setFromEuler(new THREE.Euler(0, 0, MathUtils.degToRad(rotation)));
+                rotZ.setFromEuler(new THREE.Euler(0, 0, THREE.Math.degToRad(rotation)));
 
                 if (this.m_userCamerRotation !== undefined) {
                     rotZ.multiply(this.m_userCamerRotation);
@@ -413,6 +415,7 @@ export class CameraPanAnimation extends CameraAnimation {
      *
      * @param time Duration of the animation in milliseconds.
      * @param onFinished Callback that gets triggered once the animation ends.
+     * @override
      */
     start(time?: number, onFinished?: () => void): void {
         if (this.running) {
@@ -464,6 +467,7 @@ export class CameraPanAnimation extends CameraAnimation {
 
     /**
      * Stop the animation. Can be started again (with original values only, though).
+     * @override
      */
     stop(): void {
         if (!this.running) {
@@ -481,6 +485,7 @@ export class CameraPanAnimation extends CameraAnimation {
 
     /**
      * Returns `true` if the animation is being played.
+     * @override
      */
     get isRunning(): boolean {
         return this.running;

@@ -5,7 +5,7 @@
  */
 
 import { TileKey } from "@here/harp-geoutils";
-import { ExtrusionFeature } from "@here/harp-materials";
+import { ExtrusionFeature, ExtrusionFeatureDefs } from "@here/harp-materials";
 import { MathUtils } from "@here/harp-utils";
 import { MapView, MapViewEventNames, RenderEvent } from "./MapView";
 import { Tile } from "./Tile";
@@ -51,7 +51,7 @@ export class AnimatedExtrusionHandler {
      * Creates an [[AnimatedExtrusionHandler]] in [[MapView]].
      *
      * @param m_mapView Instance of [[MapView]] that passes `zoomLevel`
-     * through the `zoom` poperty update
+     * through the `zoom` property update
      */
     constructor(private m_mapView: MapView) {
         this.m_zoomLevelPrevious = this.m_mapView.zoomLevel;
@@ -146,23 +146,26 @@ export class AnimatedExtrusionHandler {
         }
         return undefined;
     }
+
+    /**
+     * Is `true` if any extrusion handlers are currently animating.
+     */
+    get isAnimating(): boolean {
+        for (const tileHandler of this.m_tileHandlerMap) {
+            if (tileHandler[1].isAnimating) {
+                return true;
+            }
+        }
+        return false;
+    }
 }
 
 /**
  * Implements animated extrusion effect for the extruded objects in the [[Tile]]
  */
 export class AnimatedExtrusionTileHandler {
-    /**
-     * Minimum ratio value for extrusion effect
-     */
-    static DEFAULT_RATIO_MIN: number = 0.001;
-    /**
-     * Maximum ratio value for extrusion effect
-     */
-    static DEFAULT_RATIO_MAX: number = 1;
-
     private m_extrudedObjects: THREE.Object3D[] = [];
-    private m_animatedExtrusionRatio: number = AnimatedExtrusionTileHandler.DEFAULT_RATIO_MAX;
+    private m_animatedExtrusionRatio: number = ExtrusionFeatureDefs.DEFAULT_RATIO_MAX;
     private m_animatedExtrusionState: AnimatedExtrusionState = AnimatedExtrusionState.None;
     private m_animatedExtrusionStartTime: number | undefined = undefined;
     private m_mapView: MapView;
@@ -177,9 +180,6 @@ export class AnimatedExtrusionTileHandler {
         this.m_animatedExtrusionHandler = this.m_mapView.animatedExtrusionHandler;
 
         extrudedObjects.forEach(extrudedObject => {
-            if (extrudedObject.materialFeature) {
-                ExtrusionFeature.addRenderHelper(extrudedObject.object);
-            }
             this.m_extrudedObjects.push(extrudedObject.object);
         });
 
@@ -195,7 +195,7 @@ export class AnimatedExtrusionTileHandler {
         this.m_animatedExtrusionRatio = value;
 
         this.m_extrudedObjects.forEach(object => {
-            const material = (object as (THREE.Mesh | THREE.LineSegments))
+            const material = (object as THREE.Mesh | THREE.LineSegments)
                 .material as ExtrusionFeature;
             material.extrusionRatio = this.m_animatedExtrusionRatio;
         });
@@ -213,6 +213,13 @@ export class AnimatedExtrusionTileHandler {
      */
     get animationState(): AnimatedExtrusionState {
         return this.m_animatedExtrusionState;
+    }
+
+    /**
+     * Is `true` if this handler is currently animating.
+     */
+    get isAnimating(): boolean {
+        return this.m_animatedExtrusionState !== AnimatedExtrusionState.Finished;
     }
 
     /**
@@ -244,13 +251,14 @@ export class AnimatedExtrusionTileHandler {
     }
 
     private getChildTiles(tileKeys: TileKey[]) {
-        let result: TileKey[] = [];
+        const result: TileKey[] = [];
 
         tileKeys.forEach(tileKey => {
-            const dataSource = this.tile.dataSource;
-            const childTileKeys = dataSource.getTilingScheme().getSubTileKeys(tileKey);
+            const childTileKeys = this.tile.dataSource.getTilingScheme().getSubTileKeys(tileKey);
 
-            result = result.concat(childTileKeys);
+            for (const childTileKey of childTileKeys) {
+                result.push(childTileKey);
+            }
         });
         return result;
     }
@@ -344,8 +352,8 @@ export class AnimatedExtrusionTileHandler {
         );
 
         this.extrusionRatio = MathUtils.easeInOutCubic(
-            AnimatedExtrusionTileHandler.DEFAULT_RATIO_MIN,
-            AnimatedExtrusionTileHandler.DEFAULT_RATIO_MAX,
+            ExtrusionFeatureDefs.DEFAULT_RATIO_MIN,
+            ExtrusionFeatureDefs.DEFAULT_RATIO_MAX,
             timeProgress / this.m_animatedExtrusionDuration
         );
 

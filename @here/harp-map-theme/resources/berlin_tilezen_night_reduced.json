@@ -100,11 +100,7 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#333334",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 14, 15],
-                        "values": [1.5, 1.2, 0.9]
-                    },
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 14, 1.2, 15, 0.9],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -113,7 +109,7 @@
                 "final": true
             },
             {
-                "description": "residential",
+                "description": "residential - background",
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
@@ -126,55 +122,94 @@
                         ["==", ["get", "kind_detail"], "service"]
                     ]
                 ],
-                "styles": [
-                    {
-                        "technique": "solid-line",
-                        "attr": {
-                            "color": "#535557",
-                            "lineWidth": {
-                                "interpolation": "Linear",
-                                "zoomLevels": [10, 11, 12, 13, 14],
-                                "values": [42, 28, 18, 7, 4]
-                            },
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9,
-                            "clipping": false
-                        },
-                        "renderOrder": 11
-                    },
-                    {
-                        "description": "residential",
-                        "technique": "solid-line",
-                        "attr": {
-                            "color": "#3B3D3F",
-                            "lineWidth": {
-                                "interpolation": "Linear",
-                                "zoomLevels": [10, 11, 12, 13, 14],
-                                "values": [38, 24, 13, 5, 3]
-                            },
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9,
-                            "clipping": false
-                        },
-                        "renderOrder": 11.3
-                    },
-                    {
-                        "technique": "text",
-                        "attr": {
-                            "color": "#999999",
-                            "backgroundColor": "#141414",
-                            "backgroundOpacity": 0.5,
-                            "textLabel": "kind_detail",
-                            "size": 16,
-                            "priority": 15,
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9
-                        },
-                        "renderOrder": 12
-                    }
-                ]
+                "technique": "solid-line",
+                "attr": {
+                    "color": "#535557",
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        10,
+                        42,
+                        11,
+                        28,
+                        12,
+                        18,
+                        13,
+                        7,
+                        14,
+                        4
+                    ],
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9,
+                    "clipping": false
+                },
+                "renderOrder": 11
             },
-            {},
+            {
+                "description": "residential - foreground",
+                "when": [
+                    "all",
+                    ["==", ["get", "$layer"], "roads"],
+                    ["!=", ["get", "kind"], "rail"],
+                    ["==", ["get", "kind"], "minor_road"],
+                    [
+                        "any",
+                        ["==", ["get", "kind_detail"], "unclassified"],
+                        ["==", ["get", "kind_detail"], "residential"],
+                        ["==", ["get", "kind_detail"], "service"]
+                    ]
+                ],
+                "technique": "solid-line",
+                "attr": {
+                    "color": "#3B3D3F",
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        10,
+                        38,
+                        11,
+                        24,
+                        12,
+                        13,
+                        13,
+                        5,
+                        14,
+                        3
+                    ],
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9,
+                    "clipping": false
+                },
+                "renderOrder": 11.3
+            },
+            {
+                "description": "residential - labels",
+                "when": [
+                    "all",
+                    ["==", ["get", "$layer"], "roads"],
+                    ["!=", ["get", "kind"], "rail"],
+                    ["==", ["get", "kind"], "minor_road"],
+                    [
+                        "any",
+                        ["==", ["get", "kind_detail"], "unclassified"],
+                        ["==", ["get", "kind_detail"], "residential"],
+                        ["==", ["get", "kind_detail"], "service"]
+                    ]
+                ],
+                "technique": "text",
+                "attr": {
+                    "color": "#999999",
+                    "backgroundColor": "#141414",
+                    "backgroundOpacity": 0.5,
+                    "size": 16,
+                    "priority": 15,
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9
+                },
+                "renderOrder": 12
+            },
             {
                 "description": "secondary",
                 "when": [
@@ -189,7 +224,6 @@
                     "color": "#999999",
                     "backgroundColor": "#141414",
                     "backgroundOpacity": 0.5,
-                    "textLabel": "kind_detail",
                     "size": 16,
                     "priority": 15,
                     "fadeNear": 0.8,
@@ -209,16 +243,48 @@
                 "attr": {
                     "color": "#393A3C",
                     "secondaryColor": "#616467",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [180, 110, 45, 30, 20, 12, 7, 5]
-                    },
-                    "secondaryWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [180, 110, 45, 30, 20, 16, 9, 6]
-                    },
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        7,
+                        180,
+                        8,
+                        110,
+                        9,
+                        45,
+                        10,
+                        30,
+                        11,
+                        20,
+                        12,
+                        12,
+                        13,
+                        7,
+                        14,
+                        5
+                    ],
+                    "secondaryWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        7,
+                        180,
+                        8,
+                        110,
+                        9,
+                        45,
+                        10,
+                        30,
+                        11,
+                        20,
+                        12,
+                        16,
+                        13,
+                        9,
+                        14,
+                        6
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -260,11 +326,29 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#56585B",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [550, 300, 100, 70, 38, 24, 14, 7, 5]
-                    },
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        6,
+                        550,
+                        7,
+                        300,
+                        8,
+                        100,
+                        9,
+                        70,
+                        10,
+                        38,
+                        11,
+                        24,
+                        12,
+                        14,
+                        13,
+                        7,
+                        14,
+                        5
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -283,11 +367,31 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#3D3E41",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [830, 410, 220, 100, 50, 30, 20, 11, 6, 4]
-                    },
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        830,
+                        6,
+                        410,
+                        7,
+                        220,
+                        8,
+                        100,
+                        9,
+                        50,
+                        10,
+                        30,
+                        11,
+                        20,
+                        12,
+                        11,
+                        13,
+                        6,
+                        14,
+                        4
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -336,11 +440,29 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#56585B",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [700, 400, 200, 90, 50, 33, 16, 11, 7]
-                    },
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        6,
+                        700,
+                        7,
+                        400,
+                        8,
+                        200,
+                        9,
+                        90,
+                        10,
+                        50,
+                        11,
+                        33,
+                        12,
+                        16,
+                        13,
+                        11,
+                        14,
+                        7
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -363,11 +485,31 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#3C3D3F",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [830, 550, 300, 150, 70, 35, 22, 12, 8, 6]
-                    },
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        830,
+                        6,
+                        550,
+                        7,
+                        300,
+                        8,
+                        150,
+                        9,
+                        70,
+                        10,
+                        35,
+                        11,
+                        22,
+                        12,
+                        12,
+                        13,
+                        8,
+                        14,
+                        6
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9,
                     "clipping": false
@@ -407,21 +549,81 @@
                 "attr": {
                     "clipping": false,
                     "color": "#484A4C",
-                    "dashSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                        "values": [4000, 2500, 1500, 1200, 560, 100, 50, 25, 16, 12, 10]
-                    },
-                    "gapSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                        "values": [4000, 2500, 1500, 1200, 300, 100, 50, 25, 16, 12, 10]
-                    },
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [320, 160, 80, 40, 15, 9, 6, 3, 1.5, 1]
-                    },
+                    "dashSize": [
+                        "step",
+                        ["zoom"],
+                        4000,
+                        7,
+                        2500,
+                        8,
+                        1500,
+                        9,
+                        1200,
+                        10,
+                        560,
+                        11,
+                        100,
+                        12,
+                        50,
+                        13,
+                        25,
+                        14,
+                        16,
+                        15,
+                        12,
+                        16,
+                        10
+                    ],
+                    "gapSize": [
+                        "step",
+                        ["zoom"],
+                        4000,
+                        7,
+                        2500,
+                        8,
+                        1500,
+                        9,
+                        1200,
+                        10,
+                        300,
+                        11,
+                        100,
+                        12,
+                        50,
+                        13,
+                        25,
+                        14,
+                        16,
+                        15,
+                        12,
+                        16,
+                        10
+                    ],
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        320,
+                        6,
+                        160,
+                        7,
+                        80,
+                        8,
+                        40,
+                        9,
+                        15,
+                        10,
+                        9,
+                        11,
+                        6,
+                        12,
+                        3,
+                        13,
+                        1.5,
+                        14,
+                        1
+                    ],
                     "fadeNear": 0.8,
                     "fadeFar": 0.9
                 },
@@ -448,7 +650,7 @@
                 "final": true
             },
             {
-                "description": "pedestrian",
+                "description": "pedestrian - background",
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
@@ -475,77 +677,100 @@
                         ]
                     ]
                 ],
-                "styles": [
-                    {
-                        "technique": "solid-line",
-                        "attr": {
-                            "color": "#5D5F62",
-                            "lineWidth": 1.5,
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9,
-                            "clipping": false
-                        },
-                        "renderOrder": 10.3
-                    },
-                    {
-                        "when": [
-                            "all",
-                            ["==", ["get", "$layer"], "roads"],
-                            ["!=", ["get", "kind"], "rail"],
-                            ["==", ["get", "kind"], "path"],
+                "technique": "solid-line",
+                "attr": {
+                    "color": "#5D5F62",
+                    "lineWidth": 1.5,
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9,
+                    "clipping": false
+                },
+                "renderOrder": 10.3
+            },
+            {
+                "description": "pedestrian - foreground",
+                "when": [
+                    "all",
+                    ["==", ["get", "$layer"], "roads"],
+                    ["!=", ["get", "kind"], "rail"],
+                    ["==", ["get", "kind"], "path"],
+                    [
+                        "any",
+                        ["in", ["get", "kind_detail"], ["pedestrian", "path", "footway"]],
+                        [
+                            "in",
+                            ["get", "landuse_kind"],
                             [
-                                "any",
-                                ["in", ["get", "kind_detail"], ["pedestrian", "path", "footway"]],
-                                [
-                                    "in",
-                                    ["get", "landuse_kind"],
-                                    [
-                                        "park",
-                                        "residential",
-                                        "footway",
-                                        "garden",
-                                        "pedestrian",
-                                        "grass",
-                                        "allotments",
-                                        "forest",
-                                        "cemetery",
-                                        "natural_wood"
-                                    ]
-                                ]
+                                "park",
+                                "residential",
+                                "footway",
+                                "garden",
+                                "pedestrian",
+                                "grass",
+                                "allotments",
+                                "forest",
+                                "cemetery",
+                                "natural_wood"
                             ]
-                        ],
-                        "technique": "solid-line",
-                        "attr": {
-                            "color": "#353637",
-                            "lineWidth": 1.3,
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9,
-                            "clipping": false
-                        },
-                        "renderOrder": 12.3
-                    },
-                    {
-                        "technique": "text",
-                        "attr": {
-                            "color": "#999999",
-                            "backgroundColor": "#141414",
-                            "backgroundOpacity": 0.5,
-                            "textLabel": "kind_detail",
-                            "size": 16,
-                            "priority": 15,
-                            "fadeNear": 0.8,
-                            "fadeFar": 0.9
-                        },
-                        "renderOrder": 12
-                    }
-                ]
+                        ]
+                    ]
+                ],
+                "technique": "solid-line",
+                "attr": {
+                    "color": "#353637",
+                    "lineWidth": 1.3,
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9,
+                    "clipping": false
+                },
+                "renderOrder": 12.3
+            },
+            {
+                "description": "pedestrian - labels",
+                "when": [
+                    "all",
+                    ["==", ["get", "$layer"], "roads"],
+                    ["!=", ["get", "kind"], "rail"],
+                    ["==", ["get", "kind"], "path"],
+                    [
+                        "any",
+                        ["in", ["get", "kind_detail"], ["pedestrian", "path", "footway"]],
+                        [
+                            "in",
+                            ["get", "landuse_kind"],
+                            [
+                                "park",
+                                "residential",
+                                "footway",
+                                "garden",
+                                "pedestrian",
+                                "grass",
+                                "allotments",
+                                "forest",
+                                "cemetery",
+                                "natural_wood"
+                            ]
+                        ]
+                    ]
+                ],
+                "technique": "text",
+                "attr": {
+                    "color": "#999999",
+                    "backgroundColor": "#141414",
+                    "backgroundOpacity": 0.5,
+                    "size": 16,
+                    "priority": 15,
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9
+                },
+                "renderOrder": 12
             },
             {
                 "description": "tram",
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     ["==", ["get", "kind_detail"], "tram"]
@@ -553,11 +778,7 @@
                 "technique": "solid-line",
                 "attr": {
                     "color": "#57585B",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 16, 17],
-                        "values": [1.5, 0.75, 0.4]
-                    }
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 16, 0.75, 17, 0.4]
                 },
                 "renderOrder": 50,
                 "final": true
@@ -567,7 +788,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     [
@@ -588,7 +809,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     ["!", ["get", "is_tunnel"]]
@@ -597,11 +818,7 @@
                 "attr": {
                     "color": "#6A6C6F",
                     "clipping": false,
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 14.6, 15],
-                        "values": [3.5, 1.5, 0.5]
-                    }
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 3.5, 14.6, 1.5, 15, 0.5]
                 },
                 "renderOrder": 5.2
             },
@@ -610,7 +827,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     ["get", "is_tunnel"]
@@ -619,11 +836,7 @@
                 "attr": {
                     "color": "#6A6C6F",
                     "clipping": false,
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 21],
-                        "values": [3.5, 2.5]
-                    }
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 3.5, 21, 2.5]
                 },
                 "renderOrder": 5.1
             },
@@ -632,7 +845,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     ["!", ["get", "is_tunnel"]]
@@ -641,21 +854,25 @@
                 "attr": {
                     "color": "#7B7E81",
                     "clipping": false,
-                    "dashSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [10, 11, 12, 13, 14, 15, 20],
-                        "values": [30, 20, 12, 7, 4, 2, 1]
-                    },
-                    "gapSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [10, 11, 12, 13, 14, 15, 20],
-                        "values": [100, 55, 50, 40, 25, 12, 8]
-                    },
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 21],
-                        "values": [2.75, 1.75]
-                    }
+                    "dashSize": ["step", ["zoom"], 30, 11, 20, 12, 12, 13, 7, 14, 4, 15, 2, 20, 1],
+                    "gapSize": [
+                        "step",
+                        ["zoom"],
+                        100,
+                        11,
+                        55,
+                        12,
+                        50,
+                        13,
+                        40,
+                        14,
+                        25,
+                        15,
+                        12,
+                        20,
+                        8
+                    ],
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 2.75, 21, 1.75]
                 },
                 "renderOrder": 5.25,
                 "final": true
@@ -665,7 +882,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "roads"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "rail"],
                     ["in", ["get", "kind_detail"], ["rail", "light_rail", "tram"]],
                     ["get", "is_tunnel"]
@@ -674,21 +891,41 @@
                 "attr": {
                     "color": "#454648",
                     "clipping": false,
-                    "dashSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [10, 11, 12, 13, 14, 15, 16],
-                        "values": [100, 40, 24, 30, 25, 15, 8]
-                    },
-                    "gapSize": {
-                        "interpolation": "Discrete",
-                        "zoomLevels": [10, 11, 12, 13, 14, 15, 16],
-                        "values": [100, 40, 24, 30, 25, 15, 8]
-                    },
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [13, 14],
-                        "values": [2.75, 1.75]
-                    }
+                    "dashSize": [
+                        "step",
+                        ["zoom"],
+                        100,
+                        11,
+                        40,
+                        12,
+                        24,
+                        13,
+                        30,
+                        14,
+                        25,
+                        15,
+                        15,
+                        16,
+                        8
+                    ],
+                    "gapSize": [
+                        "step",
+                        ["zoom"],
+                        100,
+                        11,
+                        40,
+                        12,
+                        24,
+                        13,
+                        30,
+                        14,
+                        25,
+                        15,
+                        15,
+                        16,
+                        8
+                    ],
+                    "lineWidth": ["interpolate", ["linear"], ["zoom"], 13, 2.75, 14, 1.75]
                 },
                 "renderOrder": 5.15,
                 "final": true
@@ -698,7 +935,7 @@
                 "when": [
                     "all",
                     ["==", ["get", "$layer"], "water"],
-                    ["^=", ["get", "$geometryType"], "polygon"]
+                    ["==", ["get", "$geometryType"], "polygon"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -722,33 +959,46 @@
                 "description": "country border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "country"]
                 ],
                 "technique": "solid-line",
                 "attr": {
                     "color": "#373A3C",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [
-                            5000,
-                            4000,
-                            3500,
-                            2500,
-                            1500,
-                            1000,
-                            500,
-                            250,
-                            125,
-                            60,
-                            40,
-                            20,
-                            10,
-                            5
-                        ]
-                    }
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        5000,
+                        2,
+                        4000,
+                        3,
+                        3500,
+                        4,
+                        2500,
+                        5,
+                        1500,
+                        6,
+                        1000,
+                        7,
+                        500,
+                        8,
+                        250,
+                        9,
+                        125,
+                        10,
+                        60,
+                        11,
+                        40,
+                        12,
+                        20,
+                        13,
+                        10,
+                        14,
+                        5
+                    ]
                 },
                 "renderOrder": 5
             },
@@ -756,18 +1006,44 @@
                 "description": "country border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "country"]
                 ],
                 "technique": "solid-line",
                 "attr": {
                     "color": "#2E3234",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [1000, 700, 500, 250, 110, 45, 25, 15, 10, 7.5, 5, 2.5, 1]
-                    }
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        2,
+                        1000,
+                        3,
+                        700,
+                        4,
+                        500,
+                        5,
+                        250,
+                        6,
+                        110,
+                        7,
+                        45,
+                        8,
+                        25,
+                        9,
+                        15,
+                        10,
+                        10,
+                        11,
+                        7.5,
+                        12,
+                        5,
+                        13,
+                        2.5,
+                        14,
+                        1
+                    ]
                 },
                 "renderOrder": 5
             },
@@ -775,8 +1051,8 @@
                 "description": "country border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "country"]
                 ],
                 "technique": "text",
@@ -792,8 +1068,8 @@
                 "description": "disputed border line",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     [
                         "in",
                         ["get", "kind"],
@@ -810,37 +1086,71 @@
                 "technique": "dashed-line",
                 "attr": {
                     "color": "#2E3234",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                        "values": [
-                            4000,
-                            2600,
-                            1500,
-                            1000,
-                            720,
-                            520,
-                            270,
-                            140,
-                            90,
-                            60,
-                            30,
-                            15,
-                            10,
-                            5,
-                            2
-                        ]
-                    },
-                    "dashSize": {
-                        "interpolation": "Cubic",
-                        "zoomLevels": [10, 11, 12, 13, 14],
-                        "values": [1024, 512, 256, 128, 64]
-                    },
-                    "gapSize": {
-                        "interpolation": "Cubic",
-                        "zoomLevels": [10, 11, 12, 13, 14],
-                        "values": [512, 256, 128, 64, 32]
-                    }
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        2,
+                        4000,
+                        3,
+                        2600,
+                        4,
+                        1500,
+                        5,
+                        1000,
+                        6,
+                        720,
+                        7,
+                        520,
+                        8,
+                        270,
+                        9,
+                        140,
+                        10,
+                        90,
+                        11,
+                        60,
+                        12,
+                        30,
+                        13,
+                        15,
+                        14,
+                        10,
+                        15,
+                        5,
+                        16,
+                        2
+                    ],
+                    "dashSize": [
+                        "interpolate",
+                        ["cubic"],
+                        ["zoom"],
+                        10,
+                        1024,
+                        11,
+                        512,
+                        12,
+                        256,
+                        13,
+                        128,
+                        14,
+                        64
+                    ],
+                    "gapSize": [
+                        "interpolate",
+                        ["cubic"],
+                        ["zoom"],
+                        10,
+                        512,
+                        11,
+                        256,
+                        12,
+                        128,
+                        13,
+                        64,
+                        14,
+                        32
+                    ]
                 },
                 "renderOrder": 4.1
             },
@@ -848,8 +1158,8 @@
                 "description": "disputed border line - text",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     [
                         "in",
                         ["get", "kind"],
@@ -876,18 +1186,44 @@
                 "description": "region border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "region"]
                 ],
                 "technique": "solid-line",
                 "attr": {
                     "color": "#7C7C7C",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [600, 300, 150, 100, 60, 30, 20, 12, 8, 5, 3, 2, 1]
-                    }
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        2,
+                        600,
+                        3,
+                        300,
+                        4,
+                        150,
+                        5,
+                        100,
+                        6,
+                        60,
+                        7,
+                        30,
+                        8,
+                        20,
+                        9,
+                        12,
+                        10,
+                        8,
+                        11,
+                        5,
+                        12,
+                        3,
+                        13,
+                        2,
+                        14,
+                        1
+                    ]
                 },
                 "renderOrder": 4.1
             },
@@ -895,18 +1231,44 @@
                 "description": "region border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "region"]
                 ],
                 "technique": "solid-line",
                 "attr": {
                     "color": "#7C7C7C",
-                    "lineWidth": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        "values": [600, 300, 150, 100, 60, 30, 20, 12, 8, 5, 3, 2, 1]
-                    }
+                    "lineWidth": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        2,
+                        600,
+                        3,
+                        300,
+                        4,
+                        150,
+                        5,
+                        100,
+                        6,
+                        60,
+                        7,
+                        30,
+                        8,
+                        20,
+                        9,
+                        12,
+                        10,
+                        8,
+                        11,
+                        5,
+                        12,
+                        3,
+                        13,
+                        2,
+                        14,
+                        1
+                    ]
                 },
                 "renderOrder": 4.1
             },
@@ -914,8 +1276,8 @@
                 "description": "region border",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "line"],
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "line"],
                     ["==", ["get", "kind"], "region"]
                 ],
                 "technique": "text",
@@ -930,8 +1292,8 @@
             {
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "boundaries"],
-                    ["^=", ["get", "$geometryType"], "point"]
+                    ["==", ["get", "$layer"], "boundaries"],
+                    ["==", ["get", "$geometryType"], "point"]
                 ],
                 "technique": "text",
                 "attr": {
@@ -947,9 +1309,9 @@
                 "description": "urban",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "urban"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "urban"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -962,17 +1324,29 @@
                 "description": "urban area",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "urban_area"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "urban_area"]
                 ],
                 "technique": "none",
                 "attr": {
-                    "color": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [7, 8, 9, 10, 11, 12],
-                        "values": ["#646668", "#646668", "#616465", "#616365", "#616365", "#646668"]
-                    }
+                    "color": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        7,
+                        "#646668",
+                        8,
+                        "#646668",
+                        9,
+                        "#616465",
+                        10,
+                        "#616365",
+                        11,
+                        "#616365",
+                        12,
+                        "#646668"
+                    ]
                 },
                 "renderOrder": 0.1
             },
@@ -980,8 +1354,8 @@
                 "description": "park",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     [
                         "in",
                         ["get", "kind"],
@@ -1011,8 +1385,8 @@
                 "description": "runway",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     ["==", ["get", "kind"], "runway"]
                 ],
                 "technique": "fill",
@@ -1026,9 +1400,9 @@
                 "description": "aerodrome",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "aerodrome"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "aerodrome"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -1040,9 +1414,9 @@
                 "description": "national_park",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "national_park"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "national_park"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -1054,8 +1428,8 @@
                 "description": "pitch",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     ["in", ["get", "kind"], ["pitch"]]
                 ],
                 "technique": "fill",
@@ -1068,9 +1442,9 @@
                 "description": "hospital",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "hospital"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "hospital"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -1082,9 +1456,9 @@
                 "description": "cemetery",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "cemetery"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "cemetery"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -1096,8 +1470,8 @@
                 "description": "bridge",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     ["in", ["get", "kind"], ["bridge"]]
                 ],
                 "technique": "fill",
@@ -1110,8 +1484,8 @@
                 "description": "zoo",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     ["in", ["get", "kind"], ["sport", "sports_centre", "attraction", "zoo"]]
                 ],
                 "technique": "fill",
@@ -1124,9 +1498,9 @@
                 "description": "religion",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
-                    ["^=", ["get", "kind"], "religion"]
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "kind"], "religion"]
                 ],
                 "technique": "fill",
                 "attr": {
@@ -1138,8 +1512,8 @@
                 "description": "industrial",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     [
                         "in",
                         ["get", "kind"],
@@ -1156,8 +1530,8 @@
                 "description": "farmyard",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     [
                         "in",
                         ["get", "kind"],
@@ -1174,8 +1548,8 @@
                 "description": "beach",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "landuse"],
-                    ["^=", ["get", "$geometryType"], "polygon"],
+                    ["==", ["get", "$layer"], "landuse"],
+                    ["==", ["get", "$geometryType"], "polygon"],
                     ["any", ["in", ["get", "kind"], ["beach"]], ["$=", ["get", "kind"], "_site"]]
                 ],
                 "technique": "fill",
@@ -1193,11 +1567,7 @@
                 ],
                 "technique": "text",
                 "attr": {
-                    "priority": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4],
-                        "values": [120, 100, 60]
-                    },
+                    "priority": ["interpolate", ["linear"], ["zoom"], 2, 120, 3, 100, 4, 60],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "fontVariant": "SmallCaps",
@@ -1223,18 +1593,29 @@
                 "description": "country_pop_>10000000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["in", ["get", "kind"], ["country"]],
+                    ["has", "population"],
                     [">", ["get", "population"], 10000000]
                 ],
                 "technique": "text",
                 "attr": {
                     "priority": 100,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5],
-                        "values": [11.2, 12.8, 19.2, 22.4, 25.6]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        11.2,
+                        2,
+                        12.8,
+                        3,
+                        19.2,
+                        4,
+                        22.4,
+                        5,
+                        25.6
+                    ],
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1250,18 +1631,29 @@
                 "description": "country_pop_>1000000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["in", ["get", "kind"], ["country"]],
+                    ["has", "population"],
                     [">", ["get", "population"], 1000000]
                 ],
                 "technique": "text",
                 "attr": {
                     "priority": 100,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5],
-                        "values": [8, 9.6, 12.8, 16, 19.2]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        8,
+                        2,
+                        9.6,
+                        3,
+                        12.8,
+                        4,
+                        16,
+                        5,
+                        19.2
+                    ],
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1277,17 +1669,27 @@
                 "description": "country",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["in", ["get", "kind"], ["country"]]
                 ],
                 "technique": "text",
                 "attr": {
                     "priority": 90,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5],
-                        "values": [6.4, 11.2, 9.6, 12.8, 16]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        6.4,
+                        2,
+                        11.2,
+                        3,
+                        9.6,
+                        4,
+                        12.8,
+                        5,
+                        16
+                    ],
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1303,16 +1705,24 @@
                 "description": "Places",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["in", ["get", "kind"], ["region"]]
                 ],
                 "technique": "none",
                 "attr": {
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [3, 4, 5, 6],
-                        "values": [9.6, 10.88, 12.8, 14.4]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        3,
+                        9.6,
+                        4,
+                        10.88,
+                        5,
+                        12.8,
+                        6,
+                        14.4
+                    ],
                     "priority": 65,
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
@@ -1328,21 +1738,43 @@
                 "description": "locality_pop_>10000000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
-                    ["has", "population"],
-                    ["any", [">", ["get", "population"], 10000000], ["has", "country_capital"]],
-                    ["has", "country_capital"]
+                    [
+                        "any",
+                        [">", ["number", ["get", "population"], 0], 10000000],
+                        ["has", "country_capital"]
+                    ]
                 ],
                 "technique": "text",
                 "attr": {
                     "fontStyle": "Bold",
                     "priority": 61,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                        "values": [9.6, 11.2, 12.8, 14.4, 16, 19.2, 22.4, 25.6, 28.8, 32]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        9.6,
+                        2,
+                        11.2,
+                        3,
+                        12.8,
+                        4,
+                        14.4,
+                        5,
+                        16,
+                        6,
+                        19.2,
+                        7,
+                        22.4,
+                        8,
+                        25.6,
+                        9,
+                        28.8,
+                        10,
+                        32
+                    ],
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1356,19 +1788,42 @@
                 "description": "locality_pop_>10000000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
-                    ["has", "population"],
-                    ["any", [">", ["get", "population"], 10000000], ["has", "country_capital"]]
+                    [
+                        "any",
+                        [">", ["number", ["get", "population"], 0], 10000000],
+                        ["has", "country_capital"]
+                    ]
                 ],
                 "technique": "text",
                 "attr": {
                     "priority": 61,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                        "values": [9.6, 11.2, 12.8, 14.4, 16, 19.2, 22.4, 25.6, 28.8, 32]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        1,
+                        9.6,
+                        2,
+                        11.2,
+                        3,
+                        12.8,
+                        4,
+                        14.4,
+                        5,
+                        16,
+                        6,
+                        19.2,
+                        7,
+                        22.4,
+                        8,
+                        25.6,
+                        9,
+                        28.8,
+                        10,
+                        32
+                    ],
                     "color": "#ffffff",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1382,19 +1837,42 @@
                 "description": "locality_pop_>1000000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
-                    ["has", "population"],
-                    ["any", [">", ["get", "population"], 1000000], ["has", "region_capital"]]
+                    [
+                        "any",
+                        [">", ["number", ["get", "population"], 0], 1000000],
+                        ["has", "region_capital"]
+                    ]
                 ],
                 "technique": "text",
                 "attr": {
                     "priority": 60,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-                        "values": [9.6, 11.2, 12.8, 14.4, 16, 19.2, 22.4, 25.6, 28.8, 32]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        2,
+                        9.6,
+                        3,
+                        11.2,
+                        4,
+                        12.8,
+                        5,
+                        14.4,
+                        6,
+                        16,
+                        7,
+                        19.2,
+                        8,
+                        22.4,
+                        9,
+                        25.6,
+                        10,
+                        28.8,
+                        11,
+                        32
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1408,7 +1886,7 @@
                 "description": "locality_pop_>400000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
                     ["has", "population"],
                     [">", ["get", "population"], 400000]
@@ -1416,11 +1894,27 @@
                 "technique": "text",
                 "attr": {
                     "priority": 59,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [4, 5, 6, 7, 8, 9, 10, 11],
-                        "values": [11.2, 12.8, 16, 19.2, 22.4, 24, 25.6, 27.2]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        4,
+                        11.2,
+                        5,
+                        12.8,
+                        6,
+                        16,
+                        7,
+                        19.2,
+                        8,
+                        22.4,
+                        9,
+                        24,
+                        10,
+                        25.6,
+                        11,
+                        27.2
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1434,7 +1928,7 @@
                 "description": "locality_pop_>100000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
                     ["has", "population"],
                     [">", ["get", "population"], 100000]
@@ -1442,11 +1936,29 @@
                 "technique": "text",
                 "attr": {
                     "priority": 58,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        "values": [9.6, 11.2, 12.8, 16, 19.2, 20.8, 22.4, 24, 25.6]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        4,
+                        9.6,
+                        5,
+                        11.2,
+                        6,
+                        12.8,
+                        7,
+                        16,
+                        8,
+                        19.2,
+                        9,
+                        20.8,
+                        10,
+                        22.4,
+                        11,
+                        24,
+                        12,
+                        25.6
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1460,7 +1972,7 @@
                 "description": "locality_pop_>50000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
                     ["has", "population"],
                     [">", ["get", "population"], 50000]
@@ -1468,11 +1980,19 @@
                 "technique": "text",
                 "attr": {
                     "priority": 57,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [10, 11, 12, 13],
-                        "values": [16, 19.2, 22.4, 24]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        10,
+                        16,
+                        11,
+                        19.2,
+                        12,
+                        22.4,
+                        13,
+                        24
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1486,7 +2006,7 @@
                 "description": "locality_pop_>10000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
                     ["has", "population"],
                     [">", ["get", "population"], 10000]
@@ -1494,11 +2014,21 @@
                 "technique": "text",
                 "attr": {
                     "priority": 56,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [11, 12, 13, 14, 15],
-                        "values": [16, 17.6, 19.2, 20.8, 22.4]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        11,
+                        16,
+                        12,
+                        17.6,
+                        13,
+                        19.2,
+                        14,
+                        20.8,
+                        15,
+                        22.4
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1512,7 +2042,7 @@
                 "description": "locality_pop_<=10000",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "places"],
+                    ["==", ["get", "$layer"], "places"],
                     ["==", ["get", "kind"], "locality"],
                     ["has", "population"],
                     ["<=", ["get", "population"], 10000]
@@ -1520,11 +2050,21 @@
                 "technique": "text",
                 "attr": {
                     "priority": 50,
-                    "size": {
-                        "interpolation": "Linear",
-                        "zoomLevels": [11, 12, 13, 14, 15],
-                        "values": [12.8, 14.4, 16, 17.6, 19.2]
-                    },
+                    "size": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        11,
+                        12.8,
+                        12,
+                        14.4,
+                        13,
+                        16,
+                        14,
+                        17.6,
+                        15,
+                        19.2
+                    ],
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
                     "backgroundOpacity": 0.5,
@@ -1556,7 +2096,9 @@
                     "iconReserveSpace": false,
                     "color": "#f4f4f4",
                     "backgroundColor": "#000000",
-                    "backgroundOpacity": 0.5
+                    "backgroundOpacity": 0.5,
+                    "fadeNear": 0.8,
+                    "fadeFar": 0.9
                 },
                 "final": true
             },
@@ -1564,10 +2106,11 @@
                 "description": "building_geometry",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "buildings"],
-                    ["^=", ["get", "$geometryType"], "polygon"]
+                    ["==", ["get", "$layer"], "buildings"],
+                    ["==", ["get", "$geometryType"], "polygon"]
                 ],
                 "technique": "extruded-polygon",
+                "minZoomLevel": 16,
                 "attr": {
                     "color": "#7C7F81",
                     "opacity": 0.95,
@@ -1591,18 +2134,18 @@
                 "description": "building_address",
                 "when": [
                     "all",
-                    ["^=", ["get", "$layer"], "buildings"],
-                    ["^=", ["get", "kind"], "address"],
-                    ["^=", ["get", "$geometryType"], "point"],
-                    ["get", "label_placement"]
+                    ["==", ["get", "$layer"], "buildings"],
+                    ["==", ["get", "$geometryType"], "point"],
+                    ["==", ["get", "kind"], "address"]
                 ],
                 "technique": "text",
+                "minZoomLevel": 18,
                 "attr": {
                     "color": "#131313",
                     "label": "addr_housenumber",
                     "size": 14.4,
                     "opacity": 0.6,
-                    "minZoomLevel": 17,
+                    "minZoomLevel": 18,
                     "lineWidth": 1,
                     "fadeNear": 0.9,
                     "fadeFar": 1

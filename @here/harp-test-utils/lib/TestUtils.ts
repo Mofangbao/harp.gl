@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { assert } from "chai";
 import * as sinon from "sinon";
 
 /**
@@ -141,6 +142,29 @@ export function willEventually<T = void>(test: () => T): Promise<T> {
     });
 }
 
+/**
+ * Assert that promise is rejected.
+ *
+ * Check that promise `v` (passed directly or result of function) is eventually rejected with error
+ * that matches `errorMessagePattern`.
+ */
+export async function assertRejected(
+    v: Promise<any> | (() => Promise<any>),
+    errorMessagePattern: string | RegExp
+) {
+    let r: any;
+    try {
+        r = await Promise.resolve(typeof v === "function" ? v() : v);
+    } catch (error) {
+        if (typeof errorMessagePattern === "string") {
+            errorMessagePattern = new RegExp(errorMessagePattern);
+        }
+        assert.match(error.message, errorMessagePattern);
+        return;
+    }
+    assert.fail(`expected exception that matches ${errorMessagePattern}, but received '${r}'`);
+}
+
 export interface EventSource<T> {
     addEventListener(type: string, listener: (event: T) => void): void;
     removeEventListener(type: string, listener: (event: T) => void): void;
@@ -207,7 +231,9 @@ function reportAsyncFailuresAfterTestEnd(this: any) {
 
         // Note, this is actually mocha.IHookCallbackContext but it's not imported to not include
         // whole mocha dependency only for this very declaration.
-        this.test.error(`waitEvent didn't receive '${waitEventWaitedEvent}' before test timeouted`);
+        this.test.error(
+            new Error(`waitEvent didn't receive '${waitEventWaitedEvent}' before test timeouted`)
+        );
     }
 
     if (lastWaitedError) {

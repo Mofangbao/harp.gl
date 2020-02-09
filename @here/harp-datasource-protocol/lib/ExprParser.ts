@@ -5,14 +5,11 @@
  */
 
 import {
-    BinaryExpr,
+    CallExpr,
     ContainsExpr,
     EqualityOp,
     Expr,
     HasAttributeExpr,
-    LengthExpr,
-    LogicalExpr,
-    NotExpr,
     NumberLiteralExpr,
     RelationalOp,
     StringLiteralExpr,
@@ -420,7 +417,7 @@ export class ExprParser {
                         this.yyexpect(Token.LParen);
                         const value = this.parseLogicalOr();
                         this.yyexpect(Token.RParen);
-                        return new LengthExpr(value);
+                        return new CallExpr("length", [value]);
                     default:
                         const expr = new VarExpr(text);
                         this.lex.next();
@@ -428,6 +425,20 @@ export class ExprParser {
                 }
             }
 
+            case Token.LParen: {
+                this.lex.next();
+                const expr = this.parseLogicalOr();
+                this.yyexpect(Token.RParen);
+                return expr;
+            }
+
+            default:
+                return this.parseLiteral();
+        } // switch
+    }
+
+    private parseLiteral(): NumberLiteralExpr | StringLiteralExpr | never {
+        switch (this.lex.token()) {
             case Token.Number: {
                 const expr = new NumberLiteralExpr(parseFloat(this.lex.text()));
                 this.lex.next();
@@ -438,20 +449,15 @@ export class ExprParser {
                 this.lex.next();
                 return expr;
             }
-            case Token.LParen: {
-                this.lex.next();
-                const expr = this.parseLogicalOr();
-                this.yyexpect(Token.RParen);
-                return expr;
-            }
-        }
-        throw new Error("Syntax error");
+            default:
+                throw new Error("Syntax error");
+        } // switch
     }
 
     private parseUnary(): Expr | never {
         if (this.lex.token() === Token.Exclaim) {
             this.lex.next();
-            return new NotExpr(this.parseUnary());
+            return new CallExpr("!", [this.parseUnary()]);
         }
         return this.parsePrimary();
     }
@@ -462,13 +468,16 @@ export class ExprParser {
             if (this.lex.token() === Token.Identifier && this.lex.text() === "in") {
                 this.lex.next();
                 this.yyexpect(Token.LBracket);
-                const elements = [this.parsePrimary()];
+                const elements = [this.parseLiteral()];
                 while (this.lex.token() === Token.Comma) {
                     this.lex.next();
-                    elements.push(this.parsePrimary());
+                    elements.push(this.parseLiteral());
                 }
                 this.yyexpect(Token.RBracket);
-                expr = new ContainsExpr(expr, elements);
+                expr = new ContainsExpr(
+                    expr,
+                    elements.map(literal => literal.value)
+                );
             } else {
                 const op = getRelationalOp(this.lex.token());
                 if (op === undefined) {
@@ -476,7 +485,7 @@ export class ExprParser {
                 }
                 this.lex.next();
                 const right = this.parseUnary();
-                expr = new BinaryExpr(op, expr, right);
+                expr = new CallExpr(op, [expr, right]);
             }
         }
         return expr;
@@ -491,28 +500,42 @@ export class ExprParser {
             }
             this.lex.next();
             const right = this.parseRelational();
-            expr = new BinaryExpr(op, expr, right);
+            expr = new CallExpr(op, [expr, right]);
         }
         return expr;
     }
 
     private parseLogicalAnd(): Expr | never {
-        let expr = this.parseEquality();
-        while (this.lex.token() === Token.AmpAmp) {
-            this.lex.next();
-            const right = this.parseEquality();
-            expr = new LogicalExpr("&&", expr, right);
+        const expr = this.parseEquality();
+
+        if (this.lex.token() !== Token.AmpAmp) {
+            return expr;
         }
-        return expr;
+
+        const expressions: Expr[] = [expr];
+
+        do {
+            this.lex.next();
+            expressions.push(this.parseEquality());
+        } while (this.lex.token() === Token.AmpAmp);
+
+        return new CallExpr("all", expressions);
     }
 
     private parseLogicalOr(): Expr | never {
-        let expr = this.parseLogicalAnd();
-        while (this.lex.token() === Token.BarBar) {
-            this.lex.next();
-            const right = this.parseLogicalAnd();
-            expr = new LogicalExpr("||", expr, right);
+        const expr = this.parseLogicalAnd();
+
+        if (this.lex.token() !== Token.BarBar) {
+            return expr;
         }
-        return expr;
+
+        const expressions: Expr[] = [expr];
+
+        do {
+            this.lex.next();
+            expressions.push(this.parseLogicalAnd());
+        } while (this.lex.token() === Token.BarBar);
+
+        return new CallExpr("any", expressions);
     }
 }

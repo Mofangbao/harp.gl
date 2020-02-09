@@ -5,8 +5,10 @@
  */
 
 import {
+    AttributeMap,
     composeTechniqueTextureName,
     DecodedTile,
+    getFeatureId,
     getPropertyValue,
     ImageTexture,
     isLineMarkerTechnique,
@@ -15,24 +17,12 @@ import {
     PoiGeometry,
     PoiTechnique
 } from "@here/harp-datasource-protocol";
-import {
-    ContextualArabicConverter,
-    FontStyle,
-    FontUnit,
-    FontVariant,
-    HorizontalAlignment,
-    TextLayoutStyle,
-    TextRenderStyle,
-    VerticalAlignment,
-    WrappingMode
-} from "@here/harp-text-canvas";
-import { assert, assertExists, getOptionValue, LoggerManager } from "@here/harp-utils";
+import { ContextualArabicConverter } from "@here/harp-text-canvas";
+import { assert, assertExists, LoggerManager } from "@here/harp-utils";
 import * as THREE from "three";
-import { ColorCache } from "../ColorCache";
 import { MapView } from "../MapView";
 import { TextElement } from "../text/TextElement";
 import { DEFAULT_TEXT_DISTANCE_SCALE } from "../text/TextElementsRenderer";
-import { computeStyleCacheId } from "../text/TextStyleCache";
 import { Tile } from "../Tile";
 import { PoiTable } from "./PoiTableManager";
 
@@ -103,7 +93,6 @@ export class PoiManager {
 
     private m_imageTextures: Map<string, ImageTexture> = new Map();
     private m_poiShieldGroups: Map<string, number> = new Map();
-    private m_colorMap: Map<string, THREE.Color> = new Map();
 
     /**
      * The constructor of the `PoiManager`.
@@ -123,6 +112,7 @@ export class PoiManager {
      */
     addPois(tile: Tile, decodedTile: DecodedTile): void {
         const poiGeometries = assertExists(decodedTile.poiGeometries);
+        const worldOffsetX = tile.computeWorldOffsetX();
 
         for (const poiGeometry of poiGeometries) {
             assert(poiGeometry.technique !== undefined);
@@ -148,9 +138,9 @@ export class PoiManager {
             );
 
             if (isLineMarkerTechnique(technique) && positions.count > 0) {
-                this.addLineMarker(tile, poiGeometry, technique, techniqueIndex, positions);
+                this.addLineMarker(tile, poiGeometry, technique, positions, worldOffsetX);
             } else if (isPoiTechnique(technique)) {
-                this.addPoi(tile, poiGeometry, technique, techniqueIndex, positions);
+                this.addPoi(tile, poiGeometry, technique, positions, worldOffsetX);
             }
         }
     }
@@ -181,7 +171,7 @@ export class PoiManager {
                 }
 
                 try {
-                    logger.log(
+                    logger.debug(
                         `addTextureAtlas: Loading textureAtlas '${atlas}' for image '${imageName}'`
                     );
                     for (const textureName of Object.getOwnPropertyNames(jsonAtlas)) {
@@ -278,6 +268,9 @@ export class PoiManager {
             return false;
         }
 
+        // Remove poiTableName to mark this POI as processed.
+        poiInfo.poiTableName = undefined;
+
         // PoiTable not found or can not be loaded.
         if (poiTable === undefined || !poiTable.loadedOk) {
             PoiManager.notifyMissingPoiTable(poiTableName, poiTable);
@@ -342,8 +335,8 @@ export class PoiManager {
         tile: Tile,
         poiGeometry: PoiGeometry,
         technique: LineMarkerTechnique,
-        techniqueIdx: number,
-        positions: THREE.BufferAttribute
+        positions: THREE.BufferAttribute,
+        worldOffsetX: number
     ) {
         let imageTextureName: string | undefined =
             technique.imageTexture !== undefined
@@ -351,9 +344,17 @@ export class PoiManager {
                 : undefined;
 
         let text: string = "";
+        let userData: AttributeMap | undefined;
+        let featureId: number | undefined;
+
         if (poiGeometry.stringCatalog !== undefined) {
             assert(poiGeometry.texts.length > 0);
             text = poiGeometry.stringCatalog[poiGeometry.texts[0]] || "";
+            if (poiGeometry.objInfos !== undefined) {
+                userData = poiGeometry.objInfos[0];
+                featureId = getFeatureId(userData);
+            }
+
             if (poiGeometry.imageTextures !== undefined) {
                 assert(poiGeometry.imageTextures.length > 0);
                 imageTextureName = poiGeometry.stringCatalog[poiGeometry.imageTextures[0]];
@@ -375,26 +376,24 @@ export class PoiManager {
 
         const positionArray: THREE.Vector3[] = [];
         for (let i = 0; i < positions.count; i += 3) {
-            const x = positions.getX(i);
+            const x = positions.getX(i) + worldOffsetX;
             const y = positions.getY(i);
             const z = positions.getZ(i);
             positionArray.push(new THREE.Vector3(x, y, z));
         }
-
         const textElement = this.checkCreateTextElement(
             tile,
             text,
             technique,
-            techniqueIdx,
             imageTextureName,
             undefined, // TBD for road shields
             undefined,
             shieldGroupIndex,
-            poiGeometry.featureId,
+            featureId,
             positionArray,
             undefined,
             undefined,
-            tile.tileKey.level
+            userData
         );
 
         // If the poi icon is rendered, the label that shows text should also be rendered.
@@ -410,8 +409,8 @@ export class PoiManager {
         tile: Tile,
         poiGeometry: PoiGeometry,
         technique: PoiTechnique,
-        techniqueIdx: number,
-        positions: THREE.BufferAttribute
+        positions: THREE.BufferAttribute,
+        worldOffsetX: number
     ) {
         if (poiGeometry.stringCatalog === undefined) {
             return;
@@ -427,13 +426,16 @@ export class PoiManager {
         let poiName = poiTechnique.poiName;
 
         for (let i = 0; i < positions.count; ++i) {
-            const x = positions.getX(i);
+            const x = positions.getX(i) + worldOffsetX;
             const y = positions.getY(i);
             const z = positions.getZ(i);
 
             assert(poiGeometry.texts.length > i);
             let imageTextureName = techniqueTextureName;
             const text: string = poiGeometry.stringCatalog[poiGeometry.texts[i]] || "";
+            const userData =
+                poiGeometry.objInfos !== undefined ? poiGeometry.objInfos[i] : undefined;
+            const featureId = getFeatureId(userData);
             if (poiGeometry.imageTextures !== undefined && poiGeometry.imageTextures[i] >= 0) {
                 assert(poiGeometry.imageTextures.length > i);
                 imageTextureName = poiGeometry.stringCatalog[poiGeometry.imageTextures[i]];
@@ -454,16 +456,15 @@ export class PoiManager {
                 tile,
                 text,
                 technique,
-                techniqueIdx,
                 imageTextureName,
                 poiTableName,
                 poiName,
                 0,
-                poiGeometry.featureId,
+                featureId,
                 x,
                 y,
                 z,
-                tile.tileKey.level
+                userData
             );
 
             tile.addTextElement(textElement);
@@ -479,7 +480,6 @@ export class PoiManager {
         tile: Tile,
         text: string,
         technique: PoiTechnique | LineMarkerTechnique,
-        techniqueIdx: number,
         imageTextureName: string | undefined,
         poiTableName: string | undefined,
         poiName: string | undefined,
@@ -488,10 +488,15 @@ export class PoiManager {
         x: number | THREE.Vector3[],
         y: number | undefined,
         z: number | undefined,
-        storageLevel: number
+        userData?: {}
     ): TextElement {
+        const textElementsRenderer = this.mapView.textElementsRenderer;
         const priority = technique.priority !== undefined ? technique.priority : 0;
         const positions = Array.isArray(x) ? (x as THREE.Vector3[]) : new THREE.Vector3(x, y, z);
+
+        // The current zoomlevel of mapview. Since this method is called for all tiles in the
+        // VisibleTileSet we can be sure that the current zoomlevel matches the zoomlevel where
+        // the tile should be shown.
         const displayZoomLevel = this.mapView.zoomLevel;
         const fadeNear =
             technique.fadeNear !== undefined
@@ -501,24 +506,28 @@ export class PoiManager {
             technique.fadeFar !== undefined
                 ? getPropertyValue(technique.fadeFar, displayZoomLevel)
                 : technique.fadeFar;
+        const xOffset = getPropertyValue(technique.xOffset, displayZoomLevel);
+        const yOffset = getPropertyValue(technique.yOffset, displayZoomLevel);
 
         const textElement: TextElement = new TextElement(
             ContextualArabicConverter.instance.convert(text),
             positions,
-            this.getRenderStyle(tile.dataSource.name, technique),
-            this.getLayoutStyle(tile.dataSource.name, technique),
+            textElementsRenderer.styleCache.getRenderStyle(tile, technique),
+            textElementsRenderer.styleCache.getLayoutStyle(tile, technique),
             getPropertyValue(priority, displayZoomLevel),
-            technique.xOffset !== undefined ? technique.xOffset : 0.0,
-            technique.yOffset !== undefined ? technique.yOffset : 0.0,
+            xOffset !== undefined ? xOffset : 0.0,
+            yOffset !== undefined ? yOffset : 0.0,
             featureId,
             technique.style,
             fadeNear,
-            fadeFar
+            fadeFar,
+            tile.offset
         );
 
         textElement.mayOverlap = technique.textMayOverlap === true;
         textElement.reserveSpace = technique.textReserveSpace !== false;
         textElement.alwaysOnTop = technique.alwaysOnTop === true;
+        textElement.userData = userData;
 
         // imageTextureName may be undefined if a poiTable is used.
         if (imageTextureName === undefined && poiTableName !== undefined) {
@@ -579,159 +588,5 @@ export class PoiManager {
                 : DEFAULT_TEXT_DISTANCE_SCALE;
 
         return textElement;
-    }
-
-    private getRenderStyle(
-        dataSourceName: string,
-        technique: PoiTechnique | LineMarkerTechnique
-    ): TextRenderStyle {
-        const cacheId = computeStyleCacheId(
-            dataSourceName,
-            technique,
-            Math.floor(this.mapView.zoomLevel)
-        );
-        let renderStyle = this.mapView.textRenderStyleCache.get(cacheId);
-        if (renderStyle === undefined) {
-            const defaultRenderParams = this.mapView.textElementsRenderer!.defaultStyle
-                .renderParams;
-
-            if (technique.color !== undefined) {
-                const hexColor = getPropertyValue(
-                    technique.color,
-                    Math.floor(this.mapView.zoomLevel)
-                );
-                this.m_colorMap.set(cacheId, ColorCache.instance.getColor(hexColor));
-            }
-            if (technique.backgroundColor !== undefined) {
-                const hexBgColor = getPropertyValue(
-                    technique.backgroundColor,
-                    Math.floor(this.mapView.zoomLevel)
-                );
-                this.m_colorMap.set(cacheId + "_bg", ColorCache.instance.getColor(hexBgColor));
-            }
-
-            const renderParams = {
-                fontName: getOptionValue(technique.fontName, defaultRenderParams.fontName),
-                fontSize: {
-                    unit: FontUnit.Pixel,
-                    size:
-                        technique.size !== undefined
-                            ? getPropertyValue(technique.size, Math.floor(this.mapView.zoomLevel))
-                            : defaultRenderParams.fontSize!.size,
-                    backgroundSize:
-                        technique.backgroundSize !== undefined
-                            ? getPropertyValue(
-                                  technique.backgroundSize,
-                                  Math.floor(this.mapView.zoomLevel)
-                              )
-                            : defaultRenderParams.fontSize!.backgroundSize
-                },
-                fontStyle:
-                    technique.fontStyle === "Regular" ||
-                    technique.fontStyle === "Bold" ||
-                    technique.fontStyle === "Italic" ||
-                    technique.fontStyle === "BoldItalic"
-                        ? FontStyle[technique.fontStyle]
-                        : defaultRenderParams.fontStyle,
-                fontVariant:
-                    technique.fontVariant === "Regular" ||
-                    technique.fontVariant === "AllCaps" ||
-                    technique.fontVariant === "SmallCaps"
-                        ? FontVariant[technique.fontVariant]
-                        : defaultRenderParams.fontVariant,
-                rotation: getOptionValue(technique.rotation, defaultRenderParams.rotation),
-                color: getOptionValue(this.m_colorMap.get(cacheId), defaultRenderParams.color),
-                backgroundColor: getOptionValue(
-                    this.m_colorMap.get(cacheId + "_bg"),
-                    defaultRenderParams.backgroundColor
-                ),
-                opacity:
-                    technique.opacity !== undefined
-                        ? getPropertyValue(technique.opacity, Math.floor(this.mapView.zoomLevel))
-                        : defaultRenderParams.opacity,
-                backgroundOpacity:
-                    technique.backgroundOpacity !== undefined
-                        ? getPropertyValue(
-                              technique.backgroundOpacity,
-                              Math.floor(this.mapView.zoomLevel)
-                          )
-                        : defaultRenderParams.backgroundOpacity
-            };
-
-            const themeRenderParams =
-                this.mapView.textElementsRenderer !== undefined
-                    ? this.mapView.textElementsRenderer!.getTextElementStyle(technique.style)
-                          .renderParams
-                    : {};
-            renderStyle = new TextRenderStyle({
-                ...themeRenderParams,
-                ...renderParams
-            });
-            this.mapView.textRenderStyleCache.set(cacheId, renderStyle);
-        }
-
-        return renderStyle;
-    }
-
-    private getLayoutStyle(
-        dataSourceName: string,
-        technique: PoiTechnique | LineMarkerTechnique
-    ): TextLayoutStyle {
-        const cacheId = computeStyleCacheId(
-            dataSourceName,
-            technique,
-            Math.floor(this.mapView.zoomLevel)
-        );
-        let layoutStyle = this.mapView.textLayoutStyleCache.get(cacheId);
-        if (layoutStyle === undefined) {
-            const defaultLayoutParams = this.mapView.textElementsRenderer!.defaultStyle
-                .layoutParams;
-
-            const layoutParams = {
-                tracking: getOptionValue(technique.tracking, defaultLayoutParams.tracking),
-                leading: getOptionValue(technique.leading, defaultLayoutParams.leading),
-                maxLines: getOptionValue(technique.maxLines, defaultLayoutParams.maxLines),
-                lineWidth: getOptionValue(technique.lineWidth, defaultLayoutParams.lineWidth),
-                canvasRotation: getOptionValue(
-                    technique.canvasRotation,
-                    defaultLayoutParams.canvasRotation
-                ),
-                lineRotation: getOptionValue(
-                    technique.lineRotation,
-                    defaultLayoutParams.lineRotation
-                ),
-                wrappingMode:
-                    technique.wrappingMode === "None" ||
-                    technique.wrappingMode === "Character" ||
-                    technique.wrappingMode === "Word"
-                        ? WrappingMode[technique.wrappingMode]
-                        : defaultLayoutParams.wrappingMode,
-                horizontalAlignment:
-                    technique.hAlignment === "Left" ||
-                    technique.hAlignment === "Center" ||
-                    technique.hAlignment === "Right"
-                        ? HorizontalAlignment[technique.hAlignment]
-                        : defaultLayoutParams.horizontalAlignment,
-                verticalAlignment:
-                    technique.vAlignment === "Above" ||
-                    technique.vAlignment === "Center" ||
-                    technique.vAlignment === "Below"
-                        ? VerticalAlignment[technique.vAlignment]
-                        : defaultLayoutParams.verticalAlignment
-            };
-
-            const themeLayoutParams =
-                this.mapView.textElementsRenderer !== undefined
-                    ? this.mapView.textElementsRenderer!.getTextElementStyle(technique.style)
-                          .layoutParams
-                    : {};
-            layoutStyle = new TextLayoutStyle({
-                ...themeLayoutParams,
-                ...layoutParams
-            });
-            this.mapView.textLayoutStyleCache.set(cacheId, layoutStyle);
-        }
-
-        return layoutStyle;
     }
 }

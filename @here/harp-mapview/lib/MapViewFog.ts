@@ -5,8 +5,11 @@
  */
 
 import { Theme } from "@here/harp-datasource-protocol";
-import { HighPrecisionLineMaterial, SolidLineMaterial } from "@here/harp-materials";
+import { HighPrecisionLineMaterial } from "@here/harp-materials";
+import { assert, MathUtils } from "@here/harp-utils";
 import * as THREE from "three";
+import { MapView } from "./MapView";
+import { MapViewUtils } from "./Utils";
 
 /**
  * Manages the fog display in [[MapView]].
@@ -82,23 +85,44 @@ export class MapViewFog {
      *
      * @param camera An instance of a `THREE.Camera` with a `far` property.
      */
-    update(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera) {
+    update(mapView: MapView, viewDistance?: number) {
         if (
             this.m_scene.fog !== null &&
-            camera.far !== undefined &&
             this.m_cachedTheme !== undefined &&
             this.m_cachedTheme.fog &&
-            this.m_cachedTheme.fog.startRatio !== undefined
+            this.m_cachedTheme.fog.startRatio !== undefined &&
+            (mapView.camera.far !== undefined || viewDistance !== undefined)
         ) {
-            this.m_fog.far = camera.far;
-            this.m_fog.near = camera.far * this.m_cachedTheme.fog.startRatio;
+            // If maximum visibility range is available use it instead of camera.far distance,
+            // this makes fog independent from dynamic camera planes and keeps consistent
+            // distance based "melting" (fog) effect during a tilt.
+            const viewRange = viewDistance !== undefined ? viewDistance : mapView.camera.far;
+            // TODO: We may move below constants to theme Fog definition
+            // Density of the fog when viewing straight along the horizon line.
+            const horizontalDensity = 1.0;
+            // Theoretical density of the fog when viewing straight from top to down.
+            const verticalDensity = 0.0;
+            // The fraction of the maximum viewing distance along the eye vector
+            // to start applying the fog.
+            const startRatio = this.m_cachedTheme.fog.startRatio;
+            // The fraction of maximum viewing range at which fog fully covers geometry.
+            const endRatio = 1.0;
+            assert(startRatio <= endRatio);
+            const t = Math.abs(
+                Math.cos(MapViewUtils.extractCameraTilt(mapView.camera, mapView.projection))
+            );
+            const density = MathUtils.smoothStep(horizontalDensity, verticalDensity, t);
+            this.m_fog.near = MathUtils.lerp(viewRange * startRatio, viewRange, 1.0 - density);
+            this.m_fog.far = MathUtils.lerp(viewRange * endRatio, viewRange, density);
+            this.m_fog.near = Math.min(this.m_fog.near, mapView.camera.far);
+            this.m_fog.far = Math.min(this.m_fog.far, mapView.camera.far);
         }
     }
 
     /**
      * Handles fog addition.
      */
-    add() {
+    private add() {
         // When the fog is changed, ThreeJS takes care of recompiling its built-in materials...
         this.m_scene.fog = this.m_fog;
         // ...except the `RawShaderMaterial`, on purpose, so it needs to be updated from the app.
@@ -108,7 +132,7 @@ export class MapViewFog {
     /**
      * Handles fog removal.
      */
-    remove() {
+    private remove() {
         // When the fog is changed, ThreeJS takes care of recompiling its built-in materials...
         this.m_scene.fog = null;
         // ...except the `RawShaderMaterial`, on purpose, so it needs to be updated from the app.
@@ -123,22 +147,25 @@ export class MapViewFog {
      */
     private setFogInRawShaderMaterials(enableFog: boolean) {
         this.m_scene.traverse(object => {
-            if (object instanceof THREE.Mesh) {
-                if (object.material instanceof THREE.Material) {
-                    if (
-                        object.material instanceof THREE.Material &&
-                        // HighPrecisionLineMaterial does not support fog
-                        !(object.material instanceof HighPrecisionLineMaterial)
-                    ) {
-                        if (object.material instanceof SolidLineMaterial) {
-                            const material = object.material;
-                            (material as SolidLineMaterial).updateFog(enableFog);
-                        }
-                        object.material.fog = enableFog;
-                        object.material.needsUpdate = true;
-                    }
-                }
+            if (!(object instanceof THREE.Mesh)) {
+                return;
             }
+            if (!(object.material instanceof THREE.Material)) {
+                return;
+            }
+            // HighPrecisionLineMaterial does not support fog
+            if (object.material instanceof HighPrecisionLineMaterial) {
+                return;
+            }
+            // We may skip redundant updates.
+            if (object.material.fog === enableFog) {
+                return;
+            }
+            object.material.fog = enableFog;
+            // Fog properties can't be easily changed at runtime (once the material
+            // is rendered at least once) and thus requires building of new shader
+            // program - force material update.
+            object.material.needsUpdate = true;
         });
     }
 }

@@ -4,7 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { MaybeInterpolatedProperty } from "./InterpolatedPropertyDefs";
+import { JsonExpr } from "./Expr";
+import { InterpolatedPropertyDefinition } from "./InterpolatedPropertyDefs";
+
+/**
+ * Available line caps types(`"None"`, `"Round"`, `"Square"`, `"TriangleOut"`, `"TriangleIn"`).
+ * Default is `"Round"`.
+ */
+export type LineCaps = "Square" | "Round" | "None" | "TriangleOut" | "TriangleIn";
+
+/**
+ * Available line dash types(`"Round"`, `"Square"`, `"Diamond"`).
+ * Default is `"Square"`.
+ */
+export type LineDashes = "Square" | "Round" | "Diamond";
 
 /**
  * The kind of geometry is used to
@@ -83,6 +96,11 @@ export enum GeometryKind {
      */
     Detail = "detail"
 }
+
+/**
+ * Decorate property type with possible dynamic variants.
+ */
+export type DynamicProperty<T> = T | JsonExpr | InterpolatedPropertyDefinition<T>;
 
 /*
  * Description of length units inside a style. Supports literal values (interpreted as `m`), `m` and
@@ -166,20 +184,9 @@ export interface BaseTechniqueParams {
     renderOrder: number;
 
     /**
-     * Property that is used to hold the z-order delta in [renderOrderBiasRange].
+     *
      */
-    renderOrderBiasProperty?: string;
-
-    /**
-     * Minimum and maximum z-order delta values.
-     */
-    renderOrderBiasRange?: [number, number];
-
-    /**
-     * Z-order group. For example: used to set same render order for all roads
-     * to be able to use the z-order delta when drawing tunnels or bridges over or under the roads.
-     */
-    renderOrderBiasGroup?: string;
+    renderOrderOffset?: number;
 
     /**
      * Optional. If `true`, no IDs will be saved for the geometry this technique creates.
@@ -190,13 +197,13 @@ export interface BaseTechniqueParams {
      * Distance to the camera (0.0 = camera position, 1.0 = farPlane) at which the object start
      * fading out (opacity decreases).
      */
-    fadeNear?: MaybeInterpolatedProperty<number>;
+    fadeNear?: DynamicProperty<number>;
 
     /**
      * Distance to the camera (0.0 = camera position, 1.0 = farPlane) at which the object has zero
      * opacity and stops fading out. An undefined value disables fading.
      */
-    fadeFar?: MaybeInterpolatedProperty<number>;
+    fadeFar?: DynamicProperty<number>;
 
     /**
      * Specified kind of geometry. One kind is set as default in the technique, and can be
@@ -234,7 +241,7 @@ export interface StandardTechniqueParams extends BaseTechniqueParams {
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.color.
      * @format color-hex
      */
-    color?: MaybeInterpolatedProperty<StyleColor>;
+    color?: DynamicProperty<StyleColor>;
     /**
      * A value of `true` creates a wireframe geometry. (May not be supported with all techniques).
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.wireframe.
@@ -248,23 +255,23 @@ export interface StandardTechniqueParams extends BaseTechniqueParams {
     vertexColors?: boolean;
     /**
      * How rough the material appears. `0.0` means a smooth mirror reflection. `1.0` means fully
-     * diffuse. Default is `0.5`.
+     * diffuse. Default is `1.0`.
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.roughness.
      */
-    roughness?: MaybeInterpolatedProperty<number>;
+    roughness?: DynamicProperty<number>;
     /**
      * How much the material is like a metal. Nonmetallic materials such as wood or stone use `0.0`,
-     * metallic ones use `1.0`, with nothing (usually) in between. Default is `0.5`. A value between
+     * metallic ones use `1.0`, with nothing (usually) in between. Default is `0.0`. A value between
      * `0.0` and `1.0` can be used for a rusty metal look. If `metalnessMap` is also provided, both
      * values are multiplied.
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.metalness.
      */
-    metalness?: MaybeInterpolatedProperty<number>;
+    metalness?: DynamicProperty<number>;
     /**
      * The material will not be rendered if the opacity is lower than this value.
      * See https://threejs.org/docs/#api/en/materials/Material.alphaTest.
      */
-    alphaTest?: MaybeInterpolatedProperty<number>;
+    alphaTest?: DynamicProperty<number>;
     /**
      * Skip rendering clobbered pixels.
      * See https://threejs.org/docs/#api/en/materials/Material.depthTest.
@@ -281,19 +288,19 @@ export interface StandardTechniqueParams extends BaseTechniqueParams {
      * opaque.
      * See https://threejs.org/docs/#api/en/materials/Material.opacity.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Emissive (light) color of the material, essentially a solid color unaffected by other
      * lighting. Default is black.
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.emissive.
      * @format color-hex
      */
-    emissive?: MaybeInterpolatedProperty<StyleColor>;
+    emissive?: DynamicProperty<StyleColor>;
     /**
      * Intensity of the emissive light. Modulates the emissive color. Default is `1`.
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.emissiveIntensity.
      */
-    emissiveIntensity?: MaybeInterpolatedProperty<number>;
+    emissiveIntensity?: DynamicProperty<number>;
     /**
      * The index of refraction (IOR) of air (approximately 1) divided by the index of refraction of
      * the material. It is used with environment mapping modes `THREE.CubeRefractionMapping` and
@@ -301,7 +308,7 @@ export interface StandardTechniqueParams extends BaseTechniqueParams {
      *  is `0.98`.
      * See https://threejs.org/docs/#api/en/materials/MeshStandardMaterial.refractionRatio.
      */
-    refractionRatio?: MaybeInterpolatedProperty<number>;
+    refractionRatio?: DynamicProperty<number>;
 
     /**
      * Whether and how texture coordinates should be generated. No texture coordinates are
@@ -377,7 +384,7 @@ export interface PointTechniqueParams extends BaseTechniqueParams {
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color?: MaybeInterpolatedProperty<StyleColor>;
+    color?: DynamicProperty<StyleColor>;
     /**
      * URL of a texture image to be loaded.
      */
@@ -391,7 +398,7 @@ export interface PointTechniqueParams extends BaseTechniqueParams {
      * For transparent lines, set a value between 0.0 for totally transparent, to 1.0 for totally
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Size of point in pixels.
      */
@@ -426,22 +433,42 @@ export enum PoiStackMode {
  */
 export interface MarkerTechniqueParams extends BaseTechniqueParams {
     /**
+     * Text to be displayed for feature.
+     *
+     * Defaults to first defined:
+     *  - feature property `label` if present in technique (depreacted)
+     *  - `["get", "name:short"]` is `useAbbreviation` is true
+     *  - `["get", "iso_code"]` is `useIsoCode` is true
+     *  - `["get", "name:$LANGUAGE"]` for each specified language
+     *  - `["get", "name"]`
+     *
+     * See [[ExtendedTileInfo.getFeatureText]]
+     */
+    text?: string;
+
+    /**
      * Field name of object containing the text to be rendered.
+     *
+     * @deprecated, Use `["get", "FIELD"]`.
      */
     label?: string;
     /**
      * If `true`, the abbreviation (field `name:short`) of the elements is used as text.
+     *
+     * @deprecated Use proper expression with [`get`, `name:short`] for this purpose.
      */
     useAbbreviation?: boolean;
     /**
      * If `true`, the iso code (field 'iso_code') of the elements is used as text.
      * The `iso_code` field contains the ISO 3166-1 2-letter country code.
+     *
+     * @deprecated Use proper expression with [`get`, `iso_code`] for this purpose.
      */
     useIsoCode?: boolean;
     /**
      * Priority of marker, defaults to `0`. Markers with highest priority get placed first.
      */
-    priority?: MaybeInterpolatedProperty<number>;
+    priority?: DynamicProperty<number>;
     /**
      * Minimum zoomLevel at which to display the label text. No default.
      */
@@ -527,19 +554,19 @@ export interface MarkerTechniqueParams extends BaseTechniqueParams {
     /**
      * Horizontal offset (to the right) in screen pixels.
      */
-    xOffset?: number;
+    xOffset?: DynamicProperty<number>;
     /**
      * Vertical offset (up) in screen pixels.
      */
-    yOffset?: number;
+    yOffset?: DynamicProperty<number>;
     /**
      * Horizontal offset (to the right) in screen pixels.
      */
-    iconXOffset?: number;
+    iconXOffset?: DynamicProperty<number>;
     /**
      * Vertical offset (up) in screen pixels.
      */
-    iconYOffset?: number;
+    iconYOffset?: DynamicProperty<number>;
     /**
      * Scaling factor of icon.
      */
@@ -547,11 +574,11 @@ export interface MarkerTechniqueParams extends BaseTechniqueParams {
     /**
      * Vertical height in pixels, controls vertical scaling. Overrides `iconScale`.
      */
-    screenHeight?: number;
+    screenHeight?: DynamicProperty<number>;
     /**
      * Horizontal height in pixels, controls horizontal scaling. Overrides `iconScale`.
      */
-    screenWidth?: number;
+    screenWidth?: DynamicProperty<number>;
     /**
      * Name of the POI table which should be used for this POI.
      */
@@ -592,11 +619,11 @@ export interface MarkerTechniqueParams extends BaseTechniqueParams {
     /**
      * Size of the text (pixels).
      */
-    size?: MaybeInterpolatedProperty<number>;
+    size?: DynamicProperty<number>;
     /**
      * Size of the text background (pixels).
      */
-    backgroundSize?: MaybeInterpolatedProperty<number>;
+    backgroundSize?: DynamicProperty<number>;
     /**
      * Glyph style to apply for the currently active [[Font]].
      */
@@ -614,58 +641,58 @@ export interface MarkerTechniqueParams extends BaseTechniqueParams {
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color?: MaybeInterpolatedProperty<StyleColor>;
+    color?: DynamicProperty<StyleColor>;
     /**
      * Text background color in hexadecimal or CSS-style notation, for example: `"#e4e9ec"`,
      * `"#fff"`, `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    backgroundColor?: MaybeInterpolatedProperty<StyleColor>;
+    backgroundColor?: DynamicProperty<StyleColor>;
     /**
      * For transparent text, set a value between 0.0 for totally transparent, to 1.0 for totally
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Background text opacity value.
      */
-    backgroundOpacity?: MaybeInterpolatedProperty<number>;
+    backgroundOpacity?: DynamicProperty<number>;
     /**
      * Inter-glyph spacing (pixels). Scaled by `size`.
      */
-    tracking?: number;
+    tracking?: DynamicProperty<number>;
     /**
      * Inter-line spacing (pixels). Scaled by `size`.
      */
-    leading?: number;
+    leading?: DynamicProperty<number>;
     /**
      * Maximum number of lines for this label.
      */
-    maxLines?: number;
+    maxLines?: DynamicProperty<number>;
     /**
      * Maximum line width (pixels).
      */
-    lineWidth?: number;
+    lineWidth?: DynamicProperty<number>;
     /**
      * [[TextCanvas]] rotation (radians).
      */
-    canvasRotation?: number;
+    canvasRotation?: DynamicProperty<number>;
     /**
      * Line typesetting rotation (radians).
      */
-    lineRotation?: number;
+    lineRotation?: DynamicProperty<number>;
     /**
      * Wrapping (line-breaking) mode.
      */
-    wrappingMode?: "None" | "Character" | "Word";
+    wrappingMode?: DynamicProperty<"None" | "Character" | "Word">;
     /**
      * Text position regarding the baseline.
      */
-    hAlignment?: "Left" | "Center" | "Right";
+    hAlignment?: DynamicProperty<"Left" | "Center" | "Right">;
     /**
      * Text position inside a line.
      */
-    vAlignment?: "Above" | "Center" | "Below";
+    vAlignment?: DynamicProperty<"Above" | "Center" | "Below">;
 }
 
 export interface LineTechniqueParams extends BaseTechniqueParams {
@@ -674,7 +701,7 @@ export interface LineTechniqueParams extends BaseTechniqueParams {
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color: MaybeInterpolatedProperty<StyleColor>;
+    color: DynamicProperty<StyleColor>;
     /**
      * Set to true if line should appear transparent. Rendering transparent lines may come with a
      * slight performance impact.
@@ -684,12 +711,12 @@ export interface LineTechniqueParams extends BaseTechniqueParams {
      * For transparent lines, set a value between 0.0 for totally transparent, to 1.0 for totally
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Width of line in pixels. WebGL implementations will normally render all lines with 1 pixel
      * width, and ignore this value.
      */
-    lineWidth: MaybeInterpolatedProperty<number>;
+    lineWidth: DynamicProperty<number>;
 }
 
 /**
@@ -700,7 +727,7 @@ export interface SegmentsTechniqueParams extends BaseTechniqueParams {
      * Color of segments in a hexadecimal notation, for example: `"#e4e9ec"` or `"#fff"`.
      * @format color-hex
      */
-    color: MaybeInterpolatedProperty<StyleColor>;
+    color: DynamicProperty<StyleColor>;
     /**
      * Set to `true` if line should appear transparent. Rendering transparent lines may come with a
      * slight performance impact.
@@ -710,11 +737,11 @@ export interface SegmentsTechniqueParams extends BaseTechniqueParams {
      * For transparent lines, set a value between `0.0` for fully transparent, to `1.0` for fully
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Width of a line in meters.
      */
-    lineWidth: MaybeInterpolatedProperty<number>;
+    lineWidth: DynamicProperty<number>;
 }
 
 /**
@@ -745,30 +772,30 @@ export interface PolygonalTechniqueParams {
     /**
      * Sets the polygon offset factor. Default is 0.
      */
-    polygonOffsetFactor?: MaybeInterpolatedProperty<number>;
+    polygonOffsetFactor?: DynamicProperty<number>;
 
     /**
      * Sets the polygon offset units. Default is 0.
      */
-    polygonOffsetUnits?: MaybeInterpolatedProperty<number>;
+    polygonOffsetUnits?: DynamicProperty<number>;
 
     /**
      * Sets the polygon outline color.
      * @format color-hex
      */
-    lineColor?: MaybeInterpolatedProperty<StyleColor>;
+    lineColor?: DynamicProperty<StyleColor>;
 
     /**
      * Distance to the camera (0.0 = nearPlane, 1.0 = farPlane) at which the object edges start
      * fading out.
      */
-    lineFadeNear?: MaybeInterpolatedProperty<number>;
+    lineFadeNear?: DynamicProperty<number>;
 
     /**
      * Distance to the camera (0.0 = nearPlane, 1.0 = farPlane) at which the object edges become
      * transparent. A value of <= 0.0 disables fading.
      */
-    lineFadeFar?: MaybeInterpolatedProperty<number>;
+    lineFadeFar?: DynamicProperty<number>;
 }
 
 /**
@@ -792,7 +819,7 @@ export interface BasicExtrudedLineTechniqueParams
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color: MaybeInterpolatedProperty<StyleColor>;
+    color: DynamicProperty<StyleColor>;
     /**
      * Set to `true` if line should appear transparent. Rendering transparent lines may come with a
      * slight performance impact.
@@ -802,11 +829,11 @@ export interface BasicExtrudedLineTechniqueParams
      * For transparent lines, set a value between 0.0 for totally transparent, to 1.0 for totally
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Width of line in meters for different zoom levels.
      */
-    lineWidth: MaybeInterpolatedProperty<number>;
+    lineWidth: DynamicProperty<number>;
     /**
      * A value of `true` creates a wireframe geometry. (May not be supported with all techniques).
      */
@@ -835,7 +862,7 @@ export interface StandardExtrudedLineTechniqueParams
     /**
      * Width of a line in meters for different zoom levels.
      */
-    lineWidth: MaybeInterpolatedProperty<number>;
+    lineWidth: DynamicProperty<number>;
     /**
      * Style of both end caps. Possible values: `"None"`, `"Circle"`. A value of undefined maps to
      * `"Circle"`.
@@ -852,7 +879,13 @@ export interface SolidLineTechniqueParams extends BaseTechniqueParams, Polygonal
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color: MaybeInterpolatedProperty<StyleColor>;
+    color: DynamicProperty<StyleColor>;
+    /**
+     * Color of a line outline in hexadecimal or CSS-style notation,
+     * for example: `"#e4e9ec"`, `"#fff"`, `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
+     * @format color-hex
+     */
+    outlineColor?: DynamicProperty<StyleColor>;
     /**
      * Set to `true` if line should appear transparent. Rendering transparent lines may come with a
      * slight performance impact.
@@ -862,7 +895,7 @@ export interface SolidLineTechniqueParams extends BaseTechniqueParams, Polygonal
      * For transparent lines, set a value between `0.0` for fully transparent, to `1.0` for fully
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     // TODO: Make pixel units default.
     /**
      * @deprecated Specify metrics units as part of the value instead.
@@ -872,68 +905,69 @@ export interface SolidLineTechniqueParams extends BaseTechniqueParams, Polygonal
     /**
      * Width of a line in `metricUnit` for different zoom levels.
      */
-    lineWidth: MaybeInterpolatedProperty<StyleLength>;
+    lineWidth: DynamicProperty<StyleLength>;
+    /**
+     * Outline width of a line in `metricUnit`s for different zoom levels.
+     */
+    outlineWidth?: DynamicProperty<StyleLength>;
     /**
      * Clip the line outside the tile if `true`.
      */
     clipping?: boolean;
+    /**
+     * Describes line caps type (`"None"`, `"Round"`, `"Square"`, `"TriangleOut"`, `"TriangleIn"`).
+     * Default is `"Round"`.
+     */
+    caps?: LineCaps;
     /**
      * Color of secondary line geometry in hexadecimal or CSS-style notation, for example:
      * `"#e4e9ec"`, `"#fff"`, `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    secondaryColor?: MaybeInterpolatedProperty<StyleColor>;
+    secondaryColor?: DynamicProperty<StyleColor>;
     /**
      * Width of secondary line geometry in `metricUnit`s for different zoom levels.
      */
-    secondaryWidth?: MaybeInterpolatedProperty<StyleLength>;
+    secondaryWidth?: DynamicProperty<StyleLength>;
     /**
      * The render order of the secondary line geometry object created using this technique.
      */
     secondaryRenderOrder?: number;
-}
-
-/**
- * Declares a a geometry as a dashed line.
- */
-export interface DashedLineTechniqueParams extends BaseTechniqueParams, PolygonalTechniqueParams {
     /**
-     * Color of a line in hexadecimal or CSS-style notation, for example: `"#e4e9ec"`, `"#fff"`,
-     * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
+     * Describes secondary line caps type (`"None"`, `"Round"`, `"Square"`, `"TriangleOut"`,
+     * `"TriangleIn"`).
+     * Default is `"Round"`.
+     */
+    secondaryCaps?: LineCaps;
+    /**
+     * Describes the starting drawing position for the line (in the range [0...1]).
+     * Default is `0.0`.
+     */
+    drawRangeStart?: number;
+    /**
+     * Describes the ending drawing position for the line (in the range [0...1]).
+     * Default is `1.0`.
+     */
+    drawRangeEnd?: number;
+    /**
+     * Describes line dash type (`"Round"`, `"Square"`, `"Diamond"`).
+     * Default is `"Square"`.
+     */
+    dashes?: LineDashes;
+    /**
+     * Color of a line dashes in hexadecimal or CSS-style notation,
+     * for example: `"#e4e9ec"`, `"#fff"`, `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color: MaybeInterpolatedProperty<StyleColor>;
-    /**
-     * Set to `true` if line should appear transparent. Rendering transparent lines may come with a
-     * slight performance impact.
-     */
-    transparent?: boolean;
-    /**
-     * For transparent lines, set a value between `0.0` for fully transparent, to `1.0` for fully
-     * opaque.
-     */
-    opacity?: MaybeInterpolatedProperty<number>;
-    // TODO: Make pixel units default.
-    /**
-     * Units in which different size properties are specified. Either `Meter` (default) or `Pixel`.
-     */
-    metricUnit?: "Meter" | "Pixel";
-    /**
-     * Width of a line in `metricUnit`s for different zoom levels.
-     */
-    lineWidth: MaybeInterpolatedProperty<StyleLength>;
+    dashColor?: DynamicProperty<StyleColor>;
     /**
      * Length of a line in meters for different zoom levels.
      */
-    dashSize?: MaybeInterpolatedProperty<StyleLength>;
+    dashSize?: DynamicProperty<StyleLength>;
     /**
      * Size of a gap between lines in meters for different zoom levels.
      */
-    gapSize?: MaybeInterpolatedProperty<StyleLength>;
-    /**
-     * Clip the line outside the tile if `true`.
-     */
-    clipping?: boolean;
+    gapSize?: DynamicProperty<StyleLength>;
 }
 
 /**
@@ -945,7 +979,7 @@ export interface FillTechniqueParams extends BaseTechniqueParams, PolygonalTechn
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color?: MaybeInterpolatedProperty<StyleColor>;
+    color?: DynamicProperty<StyleColor>;
     /**
      * Set to `true` if line should appear transparent. Rendering transparent lines may come with a
      * slight performance impact.
@@ -955,7 +989,7 @@ export interface FillTechniqueParams extends BaseTechniqueParams, PolygonalTechn
      * For transparent lines, set a value between `0.0` for fully transparent, to `1.0` for fully
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * A value of `true` creates a wireframe geometry. (May not be supported with all techniques).
      */
@@ -963,7 +997,7 @@ export interface FillTechniqueParams extends BaseTechniqueParams, PolygonalTechn
     /**
      * Width of the lines. Currently limited to the [0, 1] range.
      */
-    lineWidth?: number;
+    lineWidth?: DynamicProperty<number>;
 }
 
 /**
@@ -982,13 +1016,13 @@ export interface ExtrudedPolygonTechniqueParams extends StandardTechniqueParams 
     /**
      * Width of the lines. Currently limited to the [0, 1] range.
      */
-    lineWidth: MaybeInterpolatedProperty<number>;
+    lineWidth: DynamicProperty<number>;
     /**
      * Fill color in hexadecimal or CSS-style notation, for example: `"#e4e9ec"`, `"#fff"`,
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    lineColor?: MaybeInterpolatedProperty<StyleColor>;
+    lineColor?: DynamicProperty<StyleColor>;
     /**
      * Mix value between the lineColor(0.0) and the geometry's vertex colors(1.0).
      */
@@ -998,17 +1032,32 @@ export interface ExtrudedPolygonTechniqueParams extends StandardTechniqueParams 
      * Distance to the camera (0.0 = nearPlane, 1.0 = farPlane) at which the object edges start
      * fading out.
      */
-    lineFadeNear?: MaybeInterpolatedProperty<number>;
-
+    lineFadeNear?: DynamicProperty<number>;
     /**
      * Distance to the camera (0.0 = nearPlane, 1.0 = farPlane) at which the object edges become
      * transparent. A value of <= 0.0 disables fading.
      */
-    lineFadeFar?: MaybeInterpolatedProperty<number>;
+    lineFadeFar?: DynamicProperty<number>;
+
+    /**
+     * Height above ground in world units of extruded polygon.
+     *
+     * Usually, unique per feature, so defaults to `["get", "height"]`.
+     */
+    height?: number;
+
+    /**
+     * Height of "floor" of extruded polygon in world units of extruded polygon.
+     *
+     * Usually, unique per feature, so defaults to `["number", ["get", "min_height"], 0]`.
+     */
+    floorHeight?: number;
 
     /**
      * In some data sources, for example Tilezen, building extrusion information might be missing.
      * This attribute allows to define a default height of an extruded polygon in the theme.
+     *
+     * @deprecated use [[height]]
      */
     defaultHeight?: number;
 
@@ -1017,11 +1066,12 @@ export interface ExtrudedPolygonTechniqueParams extends StandardTechniqueParams 
      * and [[MapEnv]] did not return it too.
      * @format color-hex
      */
-    defaultColor?: MaybeInterpolatedProperty<StyleColor>;
+    defaultColor?: DynamicProperty<StyleColor>;
 
     /**
      * If `true`, the height of the extruded buildings will not be modified by the mercator
      * projection distortion that happens around the poles.
+     *
      * @default `false`
      */
     constantHeight?: boolean;
@@ -1035,7 +1085,7 @@ export interface ExtrudedPolygonTechniqueParams extends StandardTechniqueParams 
     /**
      * Animate the extrusion of the buildings if set to `true`.
      */
-    animateExtrusion?: MaybeInterpolatedProperty<boolean>;
+    animateExtrusion?: DynamicProperty<boolean>;
 
     /**
      * Duration of the building's extrusion in milliseconds
@@ -1105,26 +1155,42 @@ export interface TerrainTechniqueParams extends StandardTechniqueParams {
  */
 export interface TextTechniqueParams extends BaseTechniqueParams {
     /**
+     * Text to be displayed for feature.
+     *
+     * Defaults to first defined:
+     *  - feature property `label` if present in technique (depreacted);
+     *  - `["get", "name:short"]` is `useAbbreviation` is true;
+     *  - `["get", "iso_code"]` is `useIsoCode` is true;
+     *  - `["get", "name:$LANGUAGE"]` for each specified language;
+     *  - `["get", "name"]`.
+     *
+     * See [[ExtendedTileInfo.getFeatureText]].
+     */
+    text?: string;
+
+    /**
      * Field name of object containing the text to be rendered.
+     *
+     * @deprecated, Use `["get", "FIELD"]`.
      */
     label?: string;
     /**
-     * The name of the property containing the text.
-     */
-    textLabel?: string;
-    /**
      * If `true`, the abbreviation (field `name:short`) of the elements is used as text.
+     *
+     * @deprecated Use proper expression with [`get`, `name:short`] for this purpose.
      */
     useAbbreviation?: boolean;
     /**
      * If `true`, the iso code (field 'iso_code') of the elements is used as text.
      * The `iso_code` field contains the ISO 3166-1 2-letter country code.
+     *
+     * @deprecated Use proper expression with [`get`, `iso_code`] for this purpose.
      */
     useIsoCode?: boolean;
     /**
      * Priority of text, defaults to `0`. Elements with highest priority get placed first.
      */
-    priority?: MaybeInterpolatedProperty<number>;
+    priority?: DynamicProperty<number>;
     /**
      * Minimal zoom level. If the current zoom level is smaller, the technique will not be used.
      */
@@ -1171,11 +1237,11 @@ export interface TextTechniqueParams extends BaseTechniqueParams {
     /**
      * Size of the text (pixels).
      */
-    size?: MaybeInterpolatedProperty<number>;
+    size?: DynamicProperty<number>;
     /**
      * Size of the text background (pixels).
      */
-    backgroundSize?: MaybeInterpolatedProperty<number>;
+    backgroundSize?: DynamicProperty<number>;
     /**
      * Glyph style to apply for the currently active [[Font]].
      */
@@ -1193,58 +1259,58 @@ export interface TextTechniqueParams extends BaseTechniqueParams {
      * `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    color?: MaybeInterpolatedProperty<StyleColor>;
+    color?: DynamicProperty<StyleColor>;
     /**
      * Text background color in hexadecimal or CSS-style notation, for example: `"#e4e9ec"`,
      * `"#fff"`, `"rgb(255, 0, 0)"`, or `"hsl(35, 11%, 88%)"`.
      * @format color-hex
      */
-    backgroundColor?: MaybeInterpolatedProperty<StyleColor>;
+    backgroundColor?: DynamicProperty<StyleColor>;
     /**
      * For transparent text, set a value between 0.0 for totally transparent, to 1.0 for totally
      * opaque.
      */
-    opacity?: MaybeInterpolatedProperty<number>;
+    opacity?: DynamicProperty<number>;
     /**
      * Background text opacity value.
      */
-    backgroundOpacity?: MaybeInterpolatedProperty<number>;
+    backgroundOpacity?: DynamicProperty<number>;
     /**
      * Inter-glyph spacing (pixels). Scaled by `size`.
      */
-    tracking?: number;
+    tracking?: DynamicProperty<number>;
     /**
      * Inter-line spacing (pixels). Scaled by `size`.
      */
-    leading?: number;
+    leading?: DynamicProperty<number>;
     /**
      * Maximum number of lines for this label.
      */
-    maxLines?: number;
+    maxLines?: DynamicProperty<number>;
     /**
      * Maximum line width (pixels).
      */
-    lineWidth?: number;
+    lineWidth?: DynamicProperty<number>;
     /**
      * [[TextCanvas]] rotation (radians).
      */
-    canvasRotation?: number;
+    canvasRotation?: DynamicProperty<number>;
     /**
      * Line typesetting rotation (radians).
      */
-    lineRotation?: number;
+    lineRotation?: DynamicProperty<number>;
     /**
      * Wrapping (line-breaking) mode.
      */
-    wrappingMode?: "None" | "Character" | "Word";
+    wrappingMode?: DynamicProperty<"None" | "Character" | "Word">;
     /**
      * Text position regarding the baseline.
      */
-    hAlignment?: "Left" | "Center" | "Right";
+    hAlignment?: DynamicProperty<"Left" | "Center" | "Right">;
     /**
      * Text position inside a line.
      */
-    vAlignment?: "Above" | "Center" | "Below";
+    vAlignment?: DynamicProperty<"Above" | "Center" | "Below">;
 }
 
 /**

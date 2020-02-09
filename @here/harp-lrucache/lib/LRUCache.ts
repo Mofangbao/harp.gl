@@ -66,10 +66,15 @@ export class LRUCache<Key, Value> {
     private m_sizeFunction: (v: Value) => number;
 
     /**
-     * Creates a new instance of `LRUCache`. The optional sizeFunction can be used
-     * fine tune the size required to cache that item.
+     * Creates a new instance of `LRUCache`.
      *
-     * @param cacheCapacity The maximum number of entries to store in the cache.
+     * The optional [[sizeFunction]] can be used to fine tune the memory consumption of all cached
+     * elements, thus [[cacheCapacity]] means then memory used (in MBs). Otherwise, if
+     * [[sizeFunction]] is not specified, the [[cacheCapacity]] accounts for the maximum
+     * number of elements stored.
+     *
+     * @param cacheCapacity Number used to configure the maximum cache size, may express
+     * number of entries or memory consumed in megabytes depending on [[sizeFunction]].
      * @param sizeFunction A function determining the size per element.
      */
     constructor(cacheCapacity: number, sizeFunction: (v: Value) => number = () => 1) {
@@ -80,7 +85,8 @@ export class LRUCache<Key, Value> {
     /**
      * Iterates over all items from the most recently used item to the least recently used one.
      *
-     * **Note**: Results are undefined if the cache is modified during iteration.
+     * **Note**: Results are undefined if the entire cache is modified during iteration. You may
+     * although modify the current element in [[callbackfn]] function.
      *
      * @param callbackfn The callback to call for each item.
      * @param thisArg Optional this argument for the callback.
@@ -91,8 +97,9 @@ export class LRUCache<Key, Value> {
     ): void {
         let entry = this.m_newest;
         while (entry !== null) {
+            const older = entry.older;
             callbackfn.call(thisArg, entry.value, entry.key, this);
-            entry = entry.older;
+            entry = older;
         }
     }
 
@@ -106,8 +113,9 @@ export class LRUCache<Key, Value> {
     }
 
     /**
-     * Returns the maximum capacity of the cache, i.e. the maximum number of elements this cache can
-     * contain.
+     * Returns the maximum capacity of the cache, i.e. the maximum number of elements this cache
+     * can contain or the total amount of memory that may be consumed by cache if element size
+     * function was specified in cache c-tor.
      *
      * @returns The capacity of the cache.
      */
@@ -160,6 +168,20 @@ export class LRUCache<Key, Value> {
     }
 
     /**
+     * Resets the cache capacity and function used to measure the element size.
+     *
+     * @param newCapacity The new capacity masured in units returned from [[sizeMeasure]] funtion.
+     * @param sizeMeasure Function that defines the size of element, if you want to measure
+     * number of elements only always return 1 from this function (default), you may also
+     * specify own function that measures entries by memory consumed, nubmer of sub-elements, etc.
+     */
+    setCapacityAndMeasure(newCapacity: number, sizeMeasure: (v: Value) => number = () => 1) {
+        this.m_capacity = newCapacity;
+        this.m_sizeFunction = sizeMeasure;
+        this.shrinkToCapacity();
+    }
+
+    /**
      * Updates the size of all elements in this cache. If their aggregated size is larger than the
      * capacity, items will be evicted until the cache shrinks to fit the capacity.
      */
@@ -198,7 +220,7 @@ export class LRUCache<Key, Value> {
             this.m_size = this.m_size - entry.size + valueSize;
             entry.value = value;
             entry.size = valueSize;
-            this.promote(entry);
+            this.promoteEntry(entry);
             this.evict();
         } else {
             if (valueSize > this.m_capacity) {
@@ -233,7 +255,7 @@ export class LRUCache<Key, Value> {
             return undefined;
         }
 
-        this.promote(entry);
+        this.promoteEntry(entry);
         return entry.value;
     }
 
@@ -273,6 +295,28 @@ export class LRUCache<Key, Value> {
     }
 
     /**
+     * Evict selected elements from the cache using [[selector]] function.
+     *
+     * @param selector The function for selecting elements for eviction.
+     * @param thisArg Optional _this_ object reference.
+     */
+    evictSelected(selector: (value: Value, key: Key) => boolean, thisArg?: any) {
+        const cb = this.evictionCallback;
+        let entry = this.m_newest;
+        while (entry !== null) {
+            const entryOlder = entry.older;
+            if (selector.call(thisArg, entry.value, entry.key)) {
+                if (cb !== undefined) {
+                    cb(entry.key, entry.value);
+                }
+                this.deleteEntry(entry);
+                this.m_map.delete(entry.key);
+            }
+            entry = entryOlder;
+        }
+    }
+
+    /**
      * Explicitly removes a key-value pair from the cache.
      *
      * **Note**: This is an explicit removal, thus, the eviction callback will not be called.
@@ -285,24 +329,7 @@ export class LRUCache<Key, Value> {
         if (entry === undefined) {
             return false;
         }
-
-        if (entry === this.m_newest) {
-            this.m_newest = entry.older;
-        } else if (entry.newer) {
-            entry.newer.older = entry.older;
-        } else {
-            assert(false);
-        }
-
-        if (entry === this.m_oldest) {
-            this.m_oldest = entry.newer;
-        } else if (entry.older) {
-            entry.older.newer = entry.newer;
-        } else {
-            assert(false);
-        }
-
-        this.m_size -= entry.size;
+        this.deleteEntry(entry);
         return this.m_map.delete(key);
     }
 
@@ -357,7 +384,27 @@ export class LRUCache<Key, Value> {
         return itemToRemove;
     }
 
-    private promote(entry: Entry<Key, Value>): void {
+    private deleteEntry(entry: Entry<Key, Value>): void {
+        if (entry === this.m_newest) {
+            this.m_newest = entry.older;
+        } else if (entry.newer) {
+            entry.newer.older = entry.older;
+        } else {
+            assert(false);
+        }
+
+        if (entry === this.m_oldest) {
+            this.m_oldest = entry.newer;
+        } else if (entry.older) {
+            entry.older.newer = entry.newer;
+        } else {
+            assert(false);
+        }
+
+        this.m_size -= entry.size;
+    }
+
+    private promoteEntry(entry: Entry<Key, Value>): void {
         if (entry === this.m_newest) {
             return;
         } // already newest, nothing to do
